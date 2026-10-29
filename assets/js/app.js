@@ -376,7 +376,12 @@
       res = Demo.call(body);
     } else {
       if (!CFG.API_URL) throw new Error('API URL is not set in assets/js/config.js');
-      const r = await fetch(CFG.API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+      let r;
+      try {
+        r = await fetch(CFG.API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+      } catch (e) {
+        throw new Error('Could not reach the server. Check your internet, and that the Apps Script Web App is deployed with access "Anyone" and its URL is in config.js.');
+      }
       if (!r.ok) throw new Error('Server error (' + r.status + ')');
       res = await r.json();
     }
