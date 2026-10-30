@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-01.1';
+const API_VERSION = '2026-11-02.1';
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
 const SESSION_DAYS = 7;
 const MAX_LOGIN_FAILS = 5;
@@ -34,7 +34,7 @@ const META_FIELDS = 'createdBy createdAt updatedBy updatedAt';
 
 const SCHEMA = {
   Users: {
-    fields: 'id name designation email phone role status passwordHash salt mustChange lastLogin ' + META_FIELDS,
+    fields: 'id name designation email phone role status passwordHash salt mustChange lastLogin employeeId photo ' + META_FIELDS,
   },
   Clients: {
     editable: true, prefix: 'CL',
@@ -102,7 +102,7 @@ const DEFAULT_SETTINGS = {
   company: {
     name: 'Urbane Living', perKmRate: 3, website: 'urbaneliving.in', gstNo: '09AAJFU0647A1ZC',
     address: 'G-12, Express Green Plaza, Sector-1, Vaishali, Ghaziabad', serviceArea: 'Gurugram, Noida, Delhi, Ghaziabad',
-    logoUrl: 'https://res.cloudinary.com/diosq0s7w/image/upload/q_auto/f_auto/v1779706583/Urbane-Living-05-25-2026_04_25_PM_blepmc.png',
+    logoUrl: '',
     bankName: '', bankAccount: '', bankIfsc: '', estimatePrefix: 'RFIUL', estimateValidDays: 14,
   },
   attendance: { ipPrefixes: ['2406:b400:71:93ee'], startTime: '10:00', autoMark: true, geo: { enabled: false, lat: '', lng: '', radius: 200 } },
@@ -174,6 +174,7 @@ function route_(req) {
     case 'importBatch': return importBatch_(user, req.data);
     case 'undoImport': return undoImport_(user, req.tag);
     case 'setHiddenTabs': return setHiddenTabs_(user, req.tabs);
+    case 'setPhoto': return setPhoto_(user, req.photo);
     case 'estimateGet': return { record: estimateGet_(user, req.id) };
     case 'estimateSave': return estimateSave_(user, req.record, req.mode);
     case 'estimateDelete': return estimateDelete_(user, req.id);
@@ -275,7 +276,7 @@ function endUserSessions_(uid) {
 function publicUser_(u) {
   return {
     id: u.id, name: u.name, designation: u.designation, email: u.email, phone: u.phone,
-    role: u.role, status: u.status, mustChange: isTrue_(u.mustChange), lastLogin: u.lastLogin,
+    role: u.role, status: u.status, mustChange: isTrue_(u.mustChange), lastLogin: u.lastLogin, employeeId: u.employeeId || '', photo: u.photo || '',
   };
 }
 
@@ -313,10 +314,11 @@ function bootstrap_(user) {
     settings: settings,
     data: data,
     estimates: estimatesList_(user),
+    me: mySelf_(user),
     attendanceToday: attendanceToday_(user),
     users: users.map(function (u) {
       const p = publicUser_(u);
-      if (user.role !== 'Admin') return { id: p.id, name: p.name, email: p.email, designation: p.designation, role: p.role, status: p.status };
+      if (user.role !== 'Admin') return { id: p.id, name: p.name, email: p.email, designation: p.designation, role: p.role, status: p.status, photo: p.photo };
       return p;
     }),
   };
@@ -467,7 +469,9 @@ function saveUser_(user, rec, password) {
   const patch = {
     name: String(rec.name).trim(), designation: String(rec.designation || '').trim(), email: email,
     phone: String(rec.phone || '').trim(), role: rec.role, status: status, updatedBy: user.email, updatedAt: now,
+    employeeId: String(rec.employeeId || ''),
   };
+  if (patch.employeeId && !readTable_('Employees').some(function (e) { return e.id === patch.employeeId; })) throw err_('Linked employee not found');
   if (rec.id) {
     if (!users.some(function (u) { return u.id === rec.id; })) throw err_('Member not found');
     if (password) { setPassword_(patch, password); patch.mustChange = 'TRUE'; }
@@ -695,6 +699,43 @@ function setHiddenTabs_(user, tabs) {
   writeSettings_(user, [['hiddenTabs', tabs]]);
   audit_(user, 'update', 'Settings', '', 'Hidden tabs: ' + (tabs.join(', ') || 'none'));
   return { settings: readSettings_() };
+}
+
+// ---------------------------------------------------------------------------
+// Self-service: every member sees their own employee record, salary,
+// advances, expenses and payments (linked by member → employee, else email).
+// ---------------------------------------------------------------------------
+function linkedEmployee_(user) {
+  const emps = readTable_('Employees');
+  if (user.employeeId) {
+    const e = emps.filter(function (x) { return x.id === user.employeeId; })[0];
+    if (e) return e;
+  }
+  const email = String(user.email).toLowerCase();
+  return emps.filter(function (x) { return x.email && String(x.email).toLowerCase() === email; })[0] ||
+    emps.filter(function (x) { return String(x.name).trim().toLowerCase() === String(user.name).trim().toLowerCase(); })[0] || null;
+}
+
+function mySelf_(user) {
+  const e = linkedEmployee_(user);
+  if (!e) return { employee: null };
+  const mine = function (t) { return readTable_(t).filter(function (r) { return r.employeeId === e.id; }).map(function (r) { const o = Object.assign({}, r); delete o.notes; return o; }); };
+  return {
+    employee: {
+      id: e.id, empCode: e.empCode, name: e.name, designation: e.designation, phone: e.phone, email: e.email, joiningDate: e.joiningDate,
+      monthlySalary: e.monthlySalary, perKmRate: e.perKmRate, status: e.status, bankDetails: e.bankDetails,
+    },
+    expenses: mine('EmployeeExpenses'), advances: mine('SalaryAdvances'), payments: mine('SalaryPayments'),
+  };
+}
+
+function setPhoto_(user, photo) {
+  photo = String(photo || '');
+  if (photo && !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo)) throw err_('Invalid image');
+  if (photo.length > 45000) throw err_('Photo is too large — choose a smaller image');
+  patchRow_('Users', user.id, { photo: photo, updatedBy: user.email, updatedAt: new Date().toISOString() });
+  audit_(user, 'update', 'Users', user.id, photo ? 'Changed profile photo' : 'Removed profile photo');
+  return { photo: photo };
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,7 +1292,19 @@ function sheet_(name) {
     sh.setFrozenRows(1);
   }
   if (!sh) throw err_('Sheet tab "' + name + '" is missing. Run setup() once from the Apps Script editor.');
+  ensureColumns_(sh, name);
   return sh;
+}
+
+// Columns added in later versions are appended to existing tabs on first use.
+const CHECKED_COLUMNS_ = {};
+function ensureColumns_(sh, name) {
+  if (!SCHEMA[name] || CHECKED_COLUMNS_[name]) return;
+  CHECKED_COLUMNS_[name] = true;
+  const lastCol = sh.getLastColumn();
+  const headers = lastCol ? sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String) : [];
+  const missing = fields_(name).map(function (f) { return f[0]; }).filter(function (f) { return headers.indexOf(f) < 0; });
+  if (missing.length) sh.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]).setFontWeight('bold').setBackground('#1e293b').setFontColor('#ffffff');
 }
 
 function fields_(table) {

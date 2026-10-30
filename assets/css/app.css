@@ -139,7 +139,7 @@ label.field .req { color: var(--bad); }
 }
 .login-card form { display: flex; flex-direction: column; gap: 16px; margin-top: 24px; }
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand-logo { height: 34px; max-width: 150px; object-fit: contain; display: block; }
+.brand-logo { height: 46px; max-width: 170px; object-fit: contain; display: block; }
 :root[data-theme="dark"] .brand-logo { background: #fff; border-radius: 6px; padding: 3px 6px; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .brand-logo { background: #fff; border-radius: 6px; padding: 3px 6px; } }
 .brand-mark {
@@ -168,6 +168,7 @@ label.field .req { color: var(--bad); }
 .nav a.active { background: var(--accent-soft); color: var(--accent); }
 .side-user { border-top: 1px solid var(--border); padding: 12px 8px 0; display: flex; align-items: center; gap: 10px; }
 .avatar {
+  overflow: hidden;
   width: 34px; height: 34px; border-radius: 50%; background: var(--accent-soft); color: var(--accent);
   display: grid; place-items: center; font-weight: 600; font-size: 13px; flex: none;
 }

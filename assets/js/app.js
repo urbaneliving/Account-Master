@@ -424,6 +424,7 @@
     S.users = r.users;
     S.estimates = r.estimates || [];
     S.attendanceToday = r.attendanceToday || null;
+    S.me = r.me || { employee: null };
   }
 
   async function saveRecord(table, record) {
@@ -689,15 +690,26 @@
   // ---------------------------------------------------------------------------
   // Views: login & password
   // ---------------------------------------------------------------------------
-  const LOGO = 'https://res.cloudinary.com/diosq0s7w/image/upload/q_auto/f_auto/v1779706583/Urbane-Living-05-25-2026_04_25_PM_blepmc.png';
-  function brand(sub) {
-    const logo = (S.settings && S.settings.company && S.settings.company.logoUrl) || LOGO;
-    return '<div class="brand"><img class="brand-logo" src="' + esc(logo) + '" alt="Urbane Living" onerror="this.outerHTML=\'<div class=&quot;brand-mark&quot;>UL</div>\'"><div><div class="brand-name">Account Master</div><div class="brand-sub">' + esc(sub || CFG.COMPANY || 'Urbane Living') + '</div></div></div>';
+  const LOGO = 'assets/img/logo.png';
+  const LEGACY_LOGO = /res\.cloudinary\.com\/diosq0s7w/;
+  const COMPANY = () => (S.settings && S.settings.company && S.settings.company.name) || CFG.COMPANY || 'Urbane Living';
+  function logoUrl(absolute) {
+    const custom = S.settings && S.settings.company && S.settings.company.logoUrl;
+    const url = custom && !LEGACY_LOGO.test(custom) ? custom : LOGO;
+    return absolute ? new URL(url, location.href).href : url;
+  }
+  function brand() {
+    return '<div class="brand"><img class="brand-logo" src="' + esc(logoUrl()) + '" alt="' + esc(COMPANY()) + '" onerror="this.outerHTML=\'<div class=&quot;brand-name&quot;>' + esc(COMPANY()) + '</div>\'"></div>';
+  }
+  function avatar(u, size) {
+    size = size || 34;
+    const st = 'width:' + size + 'px;height:' + size + 'px;font-size:' + Math.round(size * 0.38) + 'px';
+    return u && u.photo ? '<img class="avatar" src="' + esc(u.photo) + '" alt="" style="' + st + ';object-fit:cover">' : '<div class="avatar" style="' + st + '">' + esc(initials(u && u.name)) + '</div>';
   }
 
   function renderLogin() {
     const notConfigured = !DEMO && !CFG.API_URL;
-    $('#root').innerHTML = '<div class="login-wrap"><div class="login-card">' + brand() +
+    $('#root').innerHTML = '<div class="login-wrap"><div class="login-card">' + brand() + '<h2 style="margin:18px 0 0">' + esc(COMPANY()) + '</h2><div class="muted">Sign in to your dashboard</div>' +
       '<form id="login-form" novalidate>' +
       '<label class="field">Email<input class="input" type="email" name="email" autocomplete="username" required placeholder="name@urbaneliving.in"></label>' +
       '<label class="field">Password<input class="input" type="password" name="password" autocomplete="current-password" required></label>' +
@@ -772,6 +784,7 @@
   // [page, label, icon, accounts-only]
   const NAV = [
     ['dashboard', 'Dashboard', 'dashboard', true],
+    ['me', 'My account', 'salary', false],
     ['estimates', 'Estimates', 'estimate', false],
     ['clients', 'Clients', 'clients', true],
     ['office', 'Office expenses', 'office', true],
@@ -782,7 +795,7 @@
     ['settings', 'Settings', 'settings', false],
   ];
   const ACCOUNT_PAGES = ['dashboard', 'clients', 'office', 'salary', 'employees', 'expenses', 'sheet'];
-  const homePage = () => (seesAccounts() ? 'dashboard' : 'estimates');
+  const homePage = () => (seesAccounts() ? 'dashboard' : 'me');
 
   function route() {
     const parts = (location.hash.replace(/^#\/?/, '') || (S.user ? homePage() : 'dashboard')).split('/');
@@ -794,7 +807,7 @@
     $('#root').innerHTML = '<div class="shell">' +
       '<aside class="sidebar">' + brand() + '<nav class="nav">' +
       NAV.filter((n) => !n[3] || seesAccounts()).map((n) => '<a href="#/' + n[0] + '" data-nav="' + n[0] + '">' + icon(n[2]) + '<span>' + n[1] + '</span></a>').join('') + '</nav>' +
-      '<div class="side-user"><div class="avatar">' + esc(initials(u.name)) + '</div><div class="who"><div style="font-weight:600">' + esc(u.name) + '</div><div class="small muted">' + esc(u.role) + (DEMO ? ' · Demo' : '') + '</div></div>' +
+      '<div class="side-user"><a href="#/me" title="My account">' + avatar(u) + '</a><div class="who"><div style="font-weight:600">' + esc(u.name) + '</div><div class="small muted">' + esc(u.role) + (DEMO ? ' · Demo' : '') + '</div></div>' +
       '<button class="btn ghost icon" title="Switch theme" data-act="theme">' + icon('moon') + '</button>' +
       '<button class="btn ghost icon" title="Log out" data-act="logout">' + icon('logout') + '</button></div>' +
       '</aside><div class="scrim" data-act="nav-close"></div>' +
@@ -813,7 +826,7 @@
     if (ACCOUNT_PAGES.includes(r.page) && !seesAccounts()) { location.replace('#/' + homePage()); r = route(); }
     document.body.classList.remove('print-estimate');
     $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.nav === r.page || (r.page === 'employees' && a.dataset.nav === 'salary')));
-    const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: viewExpenses, sheet: viewSheet, settings: viewSettings, estimates: viewEstimates, attendance: viewAttendance };
+    const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: viewExpenses, sheet: viewSheet, settings: viewSettings, estimates: viewEstimates, attendance: viewAttendance, me: viewMe };
     const fn = views[r.page] || views[homePage()];
     try {
       page.innerHTML = fn(r.id);
@@ -1691,7 +1704,7 @@
     const grand = estGrand(e);
     const days = c.estimateValidDays || 14;
     let h = '<div class="est-wrap"><div class="est-doc">';
-    h += '<div class="head"><div>' + (c.logoUrl ? '<img src="' + esc(c.logoUrl) + '" alt="' + esc(c.name || 'Urbane Living') + '" onerror="this.outerHTML=\'<b style=&quot;font-size:22px&quot;>' + esc(c.name || 'Urbane Living') + '</b>\'">' : '<b style="font-size:22px">' + esc(c.name || 'Urbane Living') + '</b>') + '</div>' +
+    h += '<div class="head"><div>' + (logoUrl() ? '<img src="' + esc(logoUrl(true)) + '" alt="' + esc(c.name || 'Urbane Living') + '" onerror="this.outerHTML=\'<b style=&quot;font-size:22px&quot;>' + esc(c.name || 'Urbane Living') + '</b>\'">' : '<b style="font-size:22px">' + esc(c.name || 'Urbane Living') + '</b>') + '</div>' +
       '<div style="text-align:right"><h1>ESTIMATE</h1><div style="margin-top:5px"><div class="site">' + esc(c.website || '') + '</div><div style="font-size:15px;margin-top:3px">' + esc(c.address || '') + '</div>' +
       (c.serviceArea ? '<div style="font-size:15px;margin-top:2px"><strong>Service Area:</strong> ' + esc(c.serviceArea) + '</div>' : '') + '</div></div></div>';
     if (c.gstNo) h += '<div style="font-size:14px"><strong>GST No:</strong> ' + esc(c.gstNo) + '</div>';
@@ -2055,7 +2068,7 @@
     members.forEach((u) => {
       const cnt = { P: 0, L: 0, LV: 0, A: 0 };
       const line = [u.name];
-      h += '<tr><td><b>' + esc(u.name) + '</b><div class="cell-sub">' + esc(u.designation || u.role) + '</div></td>';
+      h += '<tr><td><div style="display:flex;gap:8px;align-items:center">' + avatar(u, 26) + '<div><b>' + esc(u.name) + '</b><div class="cell-sub">' + esc(u.designation || u.role) + '</div></div></div></td>';
       for (let d = 1; d <= days; d++) {
         const ds = st.month + '-' + pad(d);
         const r = byKey[u.email.toLowerCase() + '|' + ds];
@@ -2109,6 +2122,116 @@
   }
 
   // ---------------------------------------------------------------------------
+  // My account — each member's own profile, salary, advances, expenses
+  // ---------------------------------------------------------------------------
+  function mySalary(month) {
+    const me = S.me;
+    const e = me.employee;
+    const exp = me.expenses.filter((x) => x.salaryMonth === month);
+    const adv = me.advances.filter((x) => x.salaryMonth === month);
+    const pay = me.payments.find((x) => x.salaryMonth === month);
+    const base = pay ? num(pay.baseSalary) : num(e.monthlySalary);
+    const expenses = sum(exp, 'amount');
+    const advances = sum(adv, 'amount');
+    const deduction = pay ? num(pay.deduction) : 0;
+    const bonus = pay ? num(pay.bonus) : 0;
+    const net = round2(base + expenses - advances - deduction + bonus);
+    const paid = pay ? num(pay.paidAmount) : 0;
+    return { month, exp, adv, pay, base, expenses, advances, deduction, bonus, net, paid, balance: round2(net - paid) };
+  }
+
+  function viewMe() {
+    const u = S.user;
+    const st = ui('me');
+    if (!st.month) st.month = thisMonth();
+    let h = '<div class="card" style="margin-bottom:16px"><div class="card-body" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">' +
+      '<label title="Change photo" style="cursor:pointer;position:relative">' + avatar(u, 72) +
+      '<input type="file" accept="image/*" id="photo-input" style="display:none"><span class="badge" style="position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);background:var(--surface)">Edit</span></label>' +
+      '<div style="flex:1;min-width:200px"><h1>' + esc(u.name) + '</h1><div class="detail-meta"><span>' + esc(u.designation || '') + '</span><span>' + esc(u.email) + '</span>' + statusBadge(u.role) + '</div>' +
+      (u.photo ? '<button class="btn ghost sm" data-act="photo-remove" style="margin-top:6px;padding-left:0">Remove photo</button>' : '<div class="small muted" style="margin-top:6px">Click the circle to add your photo</div>') + '</div>' +
+      '<div class="page-actions"><a class="btn" href="#/attendance">' + icon('attendance') + 'My attendance</a><a class="btn" href="#/estimates">' + icon('estimate') + 'My estimates</a></div></div></div>';
+
+    const me = S.me || {};
+    const e = me.employee;
+    if (!e) {
+      return h + '<div class="card"><div class="empty">Your login is not linked to an employee record yet, so salary details can’t be shown.<br>Ask an Admin to link it in Settings → Members.</div></div>';
+    }
+    const s = mySalary(st.month);
+    const status = !s.pay ? (st.month >= thisMonth() ? 'Pending' : 'Pending') : s.balance > 0.009 ? 'Partial' : 'Paid';
+    h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Month"></div>';
+    h += '<div class="kpis">' + kpi('Monthly salary', inr(e.monthlySalary), esc([e.empCode, e.joiningDate && 'Joined ' + fmtDate(e.joiningDate)].filter(Boolean).join(' · '))) +
+      kpi('+ Expenses · ' + fmtMonth(st.month), inr(s.expenses), plural(s.exp.length, 'entry').replace('entrys', 'entries'), 'good') +
+      kpi('− Advances · ' + fmtMonth(st.month), inr(s.advances), plural(s.adv.length, 'advance'), s.advances ? 'bad' : '') +
+      kpi('Net payable', inr(s.net), status === 'Paid' ? 'Paid on ' + fmtDate(s.pay.paidDate) : status === 'Partial' ? 'Balance ' + inr(s.balance) : 'Not paid yet') + '</div>';
+
+    h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Salary slip · ' + esc(fmtMonth(st.month)) + '</h2>' + statusBadge(status) + '</div><div class="card-body"><div class="breakdown">' +
+      '<span>Base salary</span><span class="num">' + inr(s.base) + '</span>' +
+      '<span>+ Expenses</span><span class="num pos">' + inr(s.expenses) + '</span>' +
+      '<span>− Advances</span><span class="num neg">' + inr(s.advances) + '</span>' +
+      (s.deduction ? '<span>− Other deduction</span><span class="num neg">' + inr(s.deduction) + '</span>' : '') +
+      (s.bonus ? '<span>+ Bonus / other</span><span class="num pos">' + inr(s.bonus) + '</span>' : '') +
+      '<span class="total">Net payable</span><span class="total num">' + inr(s.net) + '</span>' +
+      '<span>Paid' + (s.pay ? ' on ' + esc(fmtDate(s.pay.paidDate)) + (s.pay.mode ? ' · ' + esc(s.pay.mode) : '') : '') + '</span><span class="num">' + inr(s.paid) + '</span>' +
+      '</div>' + (e.bankDetails ? '<p class="small muted" style="margin-bottom:0">Paid to: ' + esc(e.bankDetails) + '</p>' : '') + '</div></div>';
+    const hist = [];
+    for (let i = 0; i < 12; i++) {
+      const m = addMonths(thisMonth(), -i);
+      if (e.joiningDate && monthEnd(m) < e.joiningDate) break;
+      hist.push(Object.assign({ id: m }, mySalary(m)));
+    }
+    h += '<div class="card"><div class="card-head"><h2>Last 12 months</h2></div><div class="card-body">' + dataTable('me-hist', [
+      { k: 'month', l: 'Month', primary: true, f: (x) => esc(fmtMonth(x.month)) },
+      { k: 'net', l: 'Net', r: true, v: (x) => x.net, f: (x) => inr(x.net) },
+      { k: 'paid', l: 'Paid', r: true, v: (x) => x.paid, f: (x) => (x.pay ? inr(x.paid) : statusBadge('Pending')) },
+    ], hist, { onRow: 'me-month' }) + '</div></div></div>';
+
+    h += '<h2 style="margin:8px 0 10px">My expenses · ' + esc(fmtMonth(st.month)) + '</h2><div class="card" style="margin-bottom:16px">' + dataTable('me-exp', [
+      { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)) },
+      { k: 'expenseType', l: 'Expense', primary: true, f: (r) => '<b>' + esc(r.expenseType) + '</b>' + (r.fromTo ? '<div class="cell-sub">' + esc(r.fromTo) + '</div>' : '') },
+      { k: 'km', l: 'Km × rate', r: true, f: (r) => (r.km ? esc(r.km) + ' km × ' + inr(r.rate) : '') },
+      { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
+    ], s.exp, { sort: { k: 'date', dir: 'asc' }, empty: 'No expenses added for this month' }) + '</div>';
+    h += '<h2 style="margin:8px 0 10px">My advances</h2><div class="card">' + dataTable('me-adv', [
+      { k: 'date', l: 'Date', primary: true, f: (r) => esc(fmtDate(r.date)) },
+      { k: 'salaryMonth', l: 'Deducted from', f: (r) => esc(fmtMonth(r.salaryMonth)) },
+      { k: 'mode', l: 'Mode', f: (r) => esc(r.mode) },
+      { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
+    ], (S.me.advances || []).filter((r) => r.salaryMonth === st.month || r.date.slice(0, 7) === st.month), { sort: { k: 'date', dir: 'desc' }, empty: 'No advances this month' }) + '</div>';
+    return h;
+  }
+  viewMe.after = function () {
+    const inp = $('#photo-input');
+    if (inp) inp.addEventListener('change', () => { if (inp.files[0]) uploadPhoto(inp.files[0]); });
+  };
+
+  function uploadPhoto(file) {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = async () => {
+      const size = 160;
+      const c = document.createElement('canvas');
+      c.width = size; c.height = size;
+      const side = Math.min(img.width, img.height);
+      c.getContext('2d').drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size);
+      URL.revokeObjectURL(url);
+      let q = 0.82;
+      let data = c.toDataURL('image/jpeg', q);
+      while (data.length > 40000 && q > 0.3) { q -= 0.12; data = c.toDataURL('image/jpeg', q); }
+      try { await savePhoto(data); toast('Photo updated'); } catch (e) { toast(e.message, true); }
+    };
+    img.onerror = () => toast('Could not read this image', true);
+    img.src = url;
+  }
+  async function savePhoto(data) {
+    const r = await api('setPhoto', { photo: data });
+    S.user.photo = r.photo;
+    const mine = S.users.find((x) => x.id === S.user.id);
+    if (mine) mine.photo = r.photo;
+    renderShell();
+    renderPage();
+  }
+
+  // ---------------------------------------------------------------------------
   // Settings
   // ---------------------------------------------------------------------------
   const LIST_LABELS = {
@@ -2141,7 +2264,7 @@
     } else if (st.tab === 'members') {
       h += '<div class="filters" style="justify-content:flex-end"><button class="btn primary" data-act="member-add">' + icon('plus') + 'Add member</button></div>';
       h += '<div class="card">' + dataTable('members', [
-        { k: 'name', l: 'Member', primary: true, f: (u) => '<b>' + esc(u.name) + '</b><div class="cell-sub">' + esc(u.designation || '') + '</div>' },
+        { k: 'name', l: 'Member', primary: true, f: (u) => '<div style="display:flex;gap:10px;align-items:center">' + avatar(u, 30) + '<div><b>' + esc(u.name) + '</b><div class="cell-sub">' + esc(u.designation || '') + (u.employeeId && byId('Employees', u.employeeId) ? ' · Employee: ' + esc(byId('Employees', u.employeeId).name) : '') + '</div></div></div>' },
         { k: 'email', l: 'Email', f: (u) => esc(u.email) + (u.phone ? '<div class="cell-sub">' + esc(u.phone) + '</div>' : '') },
         { k: 'role', l: 'Access', f: (u) => statusBadge(u.role) },
         { k: 'status', l: 'Status', f: (u) => statusBadge(u.status) + (u.mustChange ? '<div class="cell-sub">Must set password</div>' : '') },
@@ -2288,12 +2411,15 @@
       '<label class="field">Mobile<input class="input" type="tel" name="phone" value="' + esc(u.phone || '') + '"></label>' +
       '<label class="field">Access<select class="input" name="role">' + opt(['Admin', 'Accountant', 'Viewer', 'Staff'], u.role) + '</select></label>' +
       '<label class="field">Status<select class="input" name="status">' + opt(['Active', 'Inactive'], u.status) + '</select></label>' +
+      '<label class="field full">Linked employee<select class="input" name="employeeId"><option value="">Automatic (same email or name)</option>' +
+        rows('Employees').slice().sort((a, b) => a.name.localeCompare(b.name)).map((e) => '<option value="' + esc(e.id) + '"' + (e.id === u.employeeId ? ' selected' : '') + '>' + esc(e.name + (e.designation ? ' · ' + e.designation : '')) + '</option>').join('') +
+        '</select><span class="field-hint">Their salary, advances and expenses show on their own “My account” page</span></label>' +
       (isNew ? '<label class="field full">One-time password<input class="input" name="password" type="text" autocomplete="off" value="' + esc(tempPassword()) + '"><span class="field-hint">Share this with the member. They must set their own password at first login.</span></label>' : '') +
       '</div>';
     openModal(isNew ? 'Add member' : 'Edit member', body, {
       submit: isNew ? 'Add member' : 'Save changes',
       onSubmit: async (form) => {
-        const rec = { id: u.id, name: form.name.value, designation: form.designation.value, email: form.email.value, phone: form.phone.value, role: form.role.value, status: form.status.value };
+        const rec = { id: u.id, name: form.name.value, designation: form.designation.value, email: form.email.value, phone: form.phone.value, role: form.role.value, status: form.status.value, employeeId: form.employeeId.value };
         await api('saveUser', { record: rec, password: isNew ? form.password.value : '' });
         await loadAll();
         toast(isNew ? 'Member added' : 'Member updated');
@@ -2456,6 +2582,8 @@
         } catch (err) { toast(err.message, true); }
         break;
       case 'est-firebase': openFirebaseImport(); break;
+      case 'photo-remove': if (confirm('Remove your photo?')) { try { await savePhoto(''); toast('Photo removed'); } catch (err) { toast(err.message, true); } } break;
+      case 'me-month': ui('me').month = el.dataset.id; renderPage(); window.scrollTo(0, 0); break;
       case 'tpl-reset':
         if (!confirm('Go back to the built-in estimate template?')) break;
         try { const r = await api('saveSettings', { settings: { estimateTemplate: null } }); S.settings = r.settings; toast('Template reset'); renderPage(); } catch (err) { toast(err.message, true); }
@@ -2641,7 +2769,7 @@
       try { db = JSON.parse(store.get(KEY) || 'null'); } catch (e) { db = null; }
       if (!db) { db = seed(); save(); }
     }
-    const pub = (u) => ({ id: u.id, name: u.name, designation: u.designation, email: u.email, phone: u.phone, role: u.role, status: u.status, mustChange: !!u.mustChange, lastLogin: u.lastLogin });
+    const pub = (u) => ({ id: u.id, name: u.name, designation: u.designation, email: u.email, phone: u.phone, role: u.role, status: u.status, mustChange: !!u.mustChange, lastLogin: u.lastLogin, employeeId: u.employeeId || '', photo: u.photo || '' });
     const fail = (msg, code) => ({ ok: false, error: msg, code: code || '' });
 
     function call(req) {
@@ -2666,8 +2794,12 @@
           db.estimates = db.estimates || [];
           db.attendance = db.attendance || [];
           const est = db.estimates.map((r) => { const o = Object.assign({}, r); delete o.data; delete o.logs; return o; });
-          return { ok: true, user: pub(user), settings: db.settings, data: JSON.parse(JSON.stringify(db.tables)), users: db.users.map(pub), estimates: est, attendanceToday: db.attendance.find((r) => r.email === user.email && r.date === today()) || null };
+          const emp = db.tables.Employees.find((e) => e.id === user.employeeId) || db.tables.Employees.find((e) => (e.email && e.email === user.email) || e.name.toLowerCase() === user.name.toLowerCase());
+          const mine = (t) => (emp ? db.tables[t].filter((r) => r.employeeId === emp.id) : []);
+          const me = emp ? { employee: emp, expenses: mine('EmployeeExpenses'), advances: mine('SalaryAdvances'), payments: mine('SalaryPayments') } : { employee: null };
+          return { ok: true, me: me, user: pub(user), settings: db.settings, data: JSON.parse(JSON.stringify(db.tables)), users: db.users.map(pub), estimates: est, attendanceToday: db.attendance.find((r) => r.email === user.email && r.date === today()) || null };
         }
+        case 'setPhoto': user.photo = req.photo; save(); return { ok: true, photo: req.photo };
         case 'estimateGet': { const r = (db.estimates || []).find((x) => x.id === req.id); return r ? { ok: true, record: JSON.parse(JSON.stringify(r)) } : fail('Estimate not found'); }
         case 'estimateSave': {
           db.estimates = db.estimates || [];
