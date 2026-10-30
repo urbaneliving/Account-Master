@@ -7,6 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
+const API_VERSION = '2026-10-30.2';
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
 const SESSION_DAYS = 7;
 const MAX_LOGIN_FAILS = 5;
@@ -107,7 +108,7 @@ const DEFAULT_SETTINGS = {
 // HTTP entry points
 // ---------------------------------------------------------------------------
 function doGet() {
-  return json_({ ok: true, app: 'Account Master API', time: new Date().toISOString() });
+  return json_({ ok: true, app: 'Account Master API', version: API_VERSION, time: new Date().toISOString() });
 }
 
 function doPost(e) {
