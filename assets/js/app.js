@@ -1,4 +1,4 @@
-/* Account Master — Urbane Living
+/* Urbane Living dashboard
  * Single-page app. All data lives in the Google Sheet behind the Apps Script
  * API (see apps-script/Code.gs). Open with ?demo=1 to try it with sample data
  * stored only in this browser.
@@ -709,7 +709,7 @@
 
   function renderLogin() {
     const notConfigured = !DEMO && !CFG.API_URL;
-    $('#root').innerHTML = '<div class="login-wrap"><div class="login-card">' + brand() + '<h2 style="margin:18px 0 0">' + esc(COMPANY()) + '</h2><div class="muted">Sign in to your dashboard</div>' +
+    $('#root').innerHTML = '<div class="login-wrap"><div class="login-card">' + brand() +
       '<form id="login-form" novalidate>' +
       '<label class="field">Email<input class="input" type="email" name="email" autocomplete="username" required placeholder="name@urbaneliving.in"></label>' +
       '<label class="field">Password<input class="input" type="password" name="password" autocomplete="current-password" required></label>' +
@@ -874,6 +874,10 @@
     let h = pageHead('Dashboard', esc(periodLabel) + (p.from ? ' · ' + fmtDate(p.from) + ' – ' + fmtDate(p.to) : ''),
       '<button class="btn" data-act="reload">' + icon('refresh') + 'Refresh</button>');
     h += '<div class="filters">' + periodControls('dashboard') + '</div>';
+    if (canWrite()) {
+      const likely = findDuplicates().filter((g) => g.likely);
+      if (likely.length) h += '<div class="notice" style="margin:0 0 16px">⚠️ ' + plural(likely.reduce((a, g) => a + g.list.length - 1, 0), 'possible duplicate entry').replace('entrys', 'entries') + ' found. <a href="#/settings" data-act="go-dups"><b>Review and remove</b></a></div>';
+    }
     h += '<div class="kpis">' +
       kpi('Received from clients', inr(cf.received), plural(rows('ClientPayments').filter((r) => inRange(r.date, p)).length, 'payment')) +
       kpi('Total spent', inr(cf.out), 'Site work, office & salary') +
@@ -1626,7 +1630,7 @@
     return {
       id: '', estimateNo: '', version: 0, status: 'Draft', clientId: '', estimateDate: today(), createdBy: S.user.email,
       client: { name: '', phone: '', address: '' }, sections: clone(t.sections), specs: clone(t.specs), terms: clone(t.terms),
-      logs: [], editing: true, newLogs: [], dirty: false,
+      logs: [], editing: false, newLogs: [], dirty: false, tempNo: tmpEstimateNo(),
     };
   }
   function estFromRecord(r) {
@@ -1639,15 +1643,21 @@
     };
   }
 
+  const fmtEstDate = (d) => (d ? d.slice(8, 10) + '-' + d.slice(5, 7) + '-' + d.slice(0, 4) : '');
+  function tmpEstimateNo() {
+    const d = new Date();
+    return ((S.settings.company && S.settings.company.estimatePrefix) || 'RFIUL') + pad(d.getMonth() + 1) + pad(d.getDate()) + Date.now().toString().slice(-3) + String(Math.floor(Math.random() * 90 + 10));
+  }
+
   function viewEstimates(id) {
-    if (!id) return estList();
-    if (id === 'new') {
-      if (!S.est || S.est.id) S.est = blankEstimate();
-      return estEditor();
+    if (id === 'new') { S.est = blankEstimate(); location.replace('#/estimates'); }
+    else if (id) {
+      if (S.est && S.est.id === id) return estPage();
+      if (S.estError) return '<div class="empty">' + esc(S.estError) + '</div>';
+      return '<div class="loading" style="min-height:300px"><div class="spinner"></div><div>Loading…</div></div>';
     }
-    if (S.est && S.est.id === id) return estEditor();
-    if (S.estError) return '<a class="back" href="#/estimates">' + icon('back') + 'Estimates</a><div class="empty">' + esc(S.estError) + '</div>';
-    return '<div class="loading" style="min-height:300px"><div class="spinner"></div><div>Opening estimate…</div></div>';
+    if (!S.est) S.est = blankEstimate();
+    return estPage();
   }
   viewEstimates.after = function () {
     const id = route().id;
@@ -1656,147 +1666,156 @@
       api('estimateGet', { id: id }).then((r) => {
         S.est = estFromRecord(r.record);
         S.estLoading = null;
+        toast('Loaded: ' + r.record.estimateNo + ' | Click Edit to modify');
         if (route().id === id) renderPage();
       }).catch((e) => { S.estLoading = null; S.estError = e.message; renderPage(); });
     }
   };
 
-  function estList() {
-    const st = ui('estimates');
-    const seeAll = ['Admin', 'Accountant', 'Viewer'].includes(S.user.role);
-    if (!st.tab) st.tab = 'list';
-    const base = st.tab === 'list' ? estLatestList() : (S.estimates || []).slice();
-    const rowsF = base.filter((r) => (!st.status || r.status === st.status) && (!st.mine || String(r.createdBy).toLowerCase() === myEmail()) &&
-      matchQ('estimates', r.estimateNo, r.clientName, r.clientAddress, userName(r.createdBy)));
-    const latest = estLatestList();
-    const val = (s) => sum(latest.filter((r) => !s || r.status === s), 'grandTotal');
-    const decided = latest.filter((r) => r.status === 'Approved' || r.status === 'Rejected').length;
+  const abtn = (act, label, cls, attrs) => '<button type="button" class="abtn ' + (cls || '') + '" data-act="' + act + '"' + (attrs || '') + '>' + label + '</button>';
 
-    let h = pageHead('Estimates', seeAll ? 'All estimates of the team · each update is kept as a new version' : 'Your estimates · each update is kept as a new version',
-      (isAdmin() ? '<button class="btn" data-act="est-firebase">' + icon('download') + 'Import old estimates</button>' : '') +
-      csvBtn('estimates') + '<a class="btn primary" href="#/estimates/new">' + icon('plus') + 'New estimate</a>');
-    h += '<div class="kpis">' + kpi('Estimates', String(latest.length), plural(latest.filter((r) => r.status === 'Draft').length, 'draft')) +
-      kpi('Total quoted', inr(val())) + kpi('Approved', inr(val('Approved')), plural(latest.filter((r) => r.status === 'Approved').length, 'estimate'), 'good') +
-      kpi('Win rate', decided ? Math.round(latest.filter((r) => r.status === 'Approved').length / decided * 100) + '%' : '—', 'Approved out of approved + rejected') + '</div>';
-    h += tabs('estimates', [['list', 'Estimates', latest.length], ['history', 'All versions', (S.estimates || []).length]], 'list');
-    h += '<div class="filters">' + searchFilter('estimates', 'Search client, estimate no, created by…') + selectFilter('estimates', 'status', 'All statuses', EST_STATUS) +
-      (seeAll ? selectFilter('estimates', 'mine', 'Everyone', [['1', 'Only mine']]) : '') + '</div>';
-    h += '<div class="card">' + dataTable('estimates', [
-      { k: 'estimateNo', l: 'Estimate', primary: true, f: (r) => '<b>' + esc(r.estimateNo) + '</b> <span class="badge">' + (r.version === 1 ? 'Original' : 'V' + r.version) + '</span>' + (st.tab === 'list' && r.versions > 1 ? '<div class="cell-sub">' + r.versions + ' versions</div>' : '') },
-      { k: 'clientName', l: 'Client', f: (r) => esc(r.clientName) + (r.clientAddress ? '<div class="cell-sub">' + esc(r.clientAddress.slice(0, 60)) + '</div>' : '') },
-      { k: 'estimateDate', l: 'Date', f: (r) => esc(fmtDate(r.estimateDate)), csv: (r) => r.estimateDate },
-      { k: 'grandTotal', l: 'Total', r: true, total: true, v: (r) => num(r.grandTotal), f: (r) => (num(r.grandTotal) ? inr(r.grandTotal) : '<span class="muted">As actual</span>') },
-      { k: 'status', l: 'Status', f: (r) => statusBadge(r.status) + (r.clientId ? '<div class="cell-sub">Client created</div>' : '') },
-      { k: 'createdBy', l: 'Created by', v: (r) => userName(r.createdBy), f: (r) => esc(userName(r.createdBy)) + (r.version > 1 ? '<div class="cell-sub">Updated by ' + esc(userName(r.updatedBy)) + '</div>' : '') },
-    ], rowsF, { onRow: 'open-est', name: 'Estimates', sort: { k: 'estimateDate', dir: 'desc' }, empty: (S.estimates || []).length ? 'No estimates match the filters' : 'No estimates yet — create the first one' }) + '</div>';
-    return h;
+  function estPage() {
+    const e = S.est;
+    const editing = e.editing && !S.estPrint;
+    const editable = canEditEst(e.estimateNo);
+    let h = '<div class="est-page">';
+    h += '<div class="est-bar no-print"><div class="sp">';
+    if (!editing) h += editable ? abtn('est-edit', icon('edit') + 'Edit Estimate', 'primary') : '';
+    else h += abtn('est-save', icon('pay') + 'Update Estimate', 'orange', ' data-mode="update"') + abtn('est-canceledit', 'Cancel Edit');
+    h += abtn('est-save', icon('pay') + 'Save New Estimate', 'primary', ' data-mode="new"') + abtn('est-blank', icon('estimate') + 'New Blank Estimate');
+    if (editing) h += abtn('est-op', icon('plus') + 'Add Section', 'green', ' data-op="secAdd"');
+    h += abtn('est-saved', icon('menu') + 'View Saved');
+    h += '</div><div class="sp"><span class="atag">' + esc(S.user.email) + '</span>' + abtn('est-print', icon('download') + 'Download PDF', 'primary') + abtn('logout', 'Logout') + '</div></div>';
+    if (!editing) {
+      h += '<div class="est-note no-print">🔒 View Mode locked. Click <b>Edit</b> to edit. To create estimate for new client: Click <b>New Blank Estimate</b>. Original stays in All Saved, Updates go to Updated History.' +
+        (!editable ? ' <i>(Only ' + esc(userName(estOwner(e.estimateNo))) + ' or an Admin can edit this one — use Save New Estimate to make your own copy.)</i>' : '') + '</div>';
+    }
+    const extras = [];
+    if (e.id && (editable || canWrite())) extras.push('Status <select class="ainput" style="width:auto;height:26px;padding:0 6px" data-act-change="est-status">' + EST_STATUS.map((x) => '<option' + (x === e.status ? ' selected' : '') + '>' + x + '</option>').join('') + '</select>');
+    if (e.id && canWrite()) extras.push(e.clientId && byId('Clients', e.clientId) ? '<a href="#/clients/' + encodeURIComponent(e.clientId) + '">Open client</a>' : '<a href="#" data-act="est-client">Create client from this estimate</a>');
+    if (isAdmin() && !editing) extras.push('<a href="#" data-act="est-template">Use as default for new estimates</a>');
+    if (isAdmin()) extras.push('<a href="#" data-act="est-firebase">Import old estimates</a>');
+    if (extras.length) h += '<div class="est-extras no-print">' + extras.join('<span class="dot">·</span>') + '</div>';
+    h += estDocHtml(e, editing);
+    return h + '</div>';
   }
 
   function estField(path, value, opts) {
     opts = opts || {};
-    if (opts.area) return '<textarea class="ed" data-ep="' + path + '" rows="' + (opts.rows || 3) + '">' + esc(value) + '</textarea>';
-    return '<input class="ed' + (opts.r ? ' r' : '') + '" data-ep="' + path + '" value="' + esc(value) + '"' + (opts.type ? ' type="' + opts.type + '"' : '') + (opts.ph ? ' placeholder="' + esc(opts.ph) + '"' : '') + '>';
+    if (opts.area) return '<textarea class="ainput" data-ep="' + path + '" rows="' + (opts.rows || 2) + '"' + (opts.ph ? ' placeholder="' + esc(opts.ph) + '"' : '') + (opts.style ? ' style="' + opts.style + '"' : '') + '>' + esc(value) + '</textarea>';
+    return '<input class="ainput" data-ep="' + path + '" value="' + esc(value) + '"' + (opts.ph ? ' placeholder="' + esc(opts.ph) + '"' : '') + (opts.style ? ' style="' + opts.style + '"' : '') + '>';
   }
-  const estBtn = (op, label, s, i, cls) => '<button type="button" class="' + (cls || '') + '" data-act="est-op" data-op="' + op + '"' + (s !== undefined ? ' data-s="' + s + '"' : '') + (i !== undefined ? ' data-i="' + i + '"' : '') + '>' + label + '</button>';
+  const estBtn = (op, label, s, i, cls, disabled) => '<button type="button" class="abtn sm ' + (cls || '') + '" data-act="est-op" data-op="' + op + '"' + (s !== undefined ? ' data-s="' + s + '"' : '') + (i !== undefined ? ' data-i="' + i + '"' : '') + (disabled ? ' disabled' : '') + '>' + label + '</button>';
+  const autoRows = (t) => Math.min(10, Math.max(1, Math.ceil(String(t || '').length / 75)));
 
   function estDocHtml(e, editing) {
     const c = S.settings.company || {};
     const grand = estGrand(e);
-    const days = c.estimateValidDays || 14;
+    const B = 'border:1px solid #000';
     let h = '<div class="est-wrap"><div class="est-doc">';
-    h += '<div class="head"><div>' + (logoUrl() ? '<img src="' + esc(logoUrl(true)) + '" alt="' + esc(c.name || 'Urbane Living') + '" onerror="this.outerHTML=\'<b style=&quot;font-size:22px&quot;>' + esc(c.name || 'Urbane Living') + '</b>\'">' : '<b style="font-size:22px">' + esc(c.name || 'Urbane Living') + '</b>') + '</div>' +
-      '<div style="text-align:right"><h1>ESTIMATE</h1><div style="margin-top:5px"><div class="site">' + esc(c.website || '') + '</div><div style="font-size:15px;margin-top:3px">' + esc(c.address || '') + '</div>' +
-      (c.serviceArea ? '<div style="font-size:15px;margin-top:2px"><strong>Service Area:</strong> ' + esc(c.serviceArea) + '</div>' : '') + '</div></div></div>';
-    if (c.gstNo) h += '<div style="font-size:14px"><strong>GST No:</strong> ' + esc(c.gstNo) + '</div>';
-    h += '<div class="meta"><div style="flex:1"><p style="font-weight:700;margin:0 0 4px;font-size:14px">Bill To</p>' +
-      (editing ? estField('client.name', e.client.name, { ph: 'Client name *' }) + '<div style="height:4px"></div>' + estField('client.phone', e.client.phone, { ph: 'Mobile (optional)' }) + '<div style="height:4px"></div>' + estField('client.address', e.client.address, { ph: 'Address' })
-        : '<div style="font-weight:600">' + esc(e.client.name) + '</div>' + (e.client.phone ? '<div>' + esc(e.client.phone) + '</div>' : '') + '<div>' + esc(e.client.address) + '</div>') + '</div>' +
-      '<div style="text-align:right;font-size:14px;min-width:230px;line-height:1.5"><div><strong>Estimate No:</strong> ' + (e.estimateNo ? esc(e.estimateNo) : '<span style="color:#888">(given on save)</span>') + (e.version > 1 ? ' <span style="color:#888">(V' + e.version + ')</span>' : '') + '</div>' +
-      '<div><strong>Estimate Date:</strong> ' + (editing ? '<input class="ed" type="date" data-ep="estimateDate" value="' + esc(e.estimateDate) + '" style="width:auto">' : esc(fmtDate(e.estimateDate).replace(/ /g, '-'))) +
-      '<br><span style="font-size:10px;color:#c00000">(Valid for ' + days + ' days)</span></div>' +
+    h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px"><div><img src="' + esc(logoUrl(true)) + '" alt="Urbane Living" style="height:65px;max-width:210px;object-fit:contain"></div>' +
+      '<div style="text-align:right"><h1 style="margin:0;font-size:28px;color:#333;font-weight:700">ESTIMATE</h1><div style="margin-top:5px">' +
+      '<div style="color:#c00000;font-size:16px;font-weight:600">' + esc(c.website || 'urbaneliving.in') + '</div>' +
+      '<div style="font-size:15px;margin-top:3px">' + esc(c.address || '') + '</div>' +
+      '<div style="font-size:15px;margin-top:2px"><strong>Service Area:</strong> ' + esc(c.serviceArea || '') + '</div></div></div></div>';
+    h += '<div style="margin-bottom:0;font-size:14px"><strong>GST No:</strong> ' + esc(c.gstNo || '') + '</div>';
+    h += '<div style="display:flex;justify-content:space-between;margin-bottom:18px;gap:20px;margin-top:10px"><div style="flex:1"><p style="font-weight:700;margin:0 0 4px;font-size:14px">Bill To</p>' +
+      (editing ? estField('client.name', e.client.name, { ph: 'Client Name' }) + estField('client.address', e.client.address, { ph: 'Address', style: 'margin-top:4px' })
+        : '<div style="font-weight:600">' + (esc(e.client.name) || '&nbsp;') + '</div><div>' + (esc(e.client.address) || '&nbsp;') + '</div>') + '</div>' +
+      '<div style="text-align:right;font-size:14px;min-width:230px;line-height:1.5"><div><strong>Estimate No:</strong> ' + esc(e.estimateNo || e.tempNo) + '</div>' +
+      '<div><strong>Estimate Date:</strong> ' + esc(fmtEstDate(e.estimateDate)) + '<br> <span style="font-size:10px;color:#c00000">(Valid for ' + esc(c.estimateValidDays || 14) + ' days)</span></div>' +
       '<div style="font-weight:700;margin-top:3px">Grand Total (INR):- <span id="est-grand">' + (grand > 0 ? estMoney(grand) : 'As Actual') + '</span></div></div></div>';
 
-    h += '<table style="margin-top:10px"><thead><tr><th style="width:35px">Sn</th><th>Product/Service</th><th style="width:85px">Area</th><th style="width:75px">Qnt/unit</th><th style="width:' + (editing ? 150 : 120) + 'px">Total</th></tr></thead><tbody>';
+    h += '<div class="mobile-scroll"><table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:10px"><thead><tr style="background:#f2f2f2">' +
+      '<th style="padding:8px;' + B + ';width:35px">Sn</th><th style="padding:8px;' + B + '">Product/Service</th><th style="padding:8px;' + B + ';width:85px">Area</th><th style="padding:8px;' + B + ';width:75px">Qnt/unit</th><th style="padding:8px;' + B + ';width:120px">Total</th></tr></thead><tbody>';
     e.sections.forEach((sec, s) => {
-      h += '<tr class="sec-row"><td class="c">' + (s + 1) + '</td><td colspan="4"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center">' +
-        (editing ? '<div style="flex:1">' + estField('sections.' + s + '.title', sec.title) + '</div><span class="mini">' + estBtn('secUp', '↑', s) + estBtn('secDown', '↓', s) + estBtn('itemAdd', '+ Item', s, undefined, 'add') + estBtn('secDel', '✕ Section', s, undefined, 'del') + '</span>' : '<span>' + esc(sec.title) + '</span>') +
-        '</div></td></tr>';
+      h += '<tr style="background:#e9e9e9;font-weight:bold"><td style="padding:6px 8px;' + B + ';text-align:center">' + (s + 1) + '</td><td colspan="4" style="padding:6px 8px;' + B + '"><div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap">' +
+        (editing ? estField('sections.' + s + '.title', sec.title, { style: 'font-weight:bold;width:55%' }) +
+          '<span class="sp">' + estBtn('secUp', '↑', s, undefined, '', s === 0) + estBtn('secDown', '↓', s, undefined, '', s === e.sections.length - 1) + estBtn('secAdd', '+ Add Sec', s, undefined, 'green') + estBtn('itemAdd', '+ Add Item', s, undefined, 'dashed') + estBtn('secDel', icon('trash') + ' Del Sec', s, undefined, 'danger') + '</span>'
+          : '<span>' + esc(sec.title) + '</span>') + '</div></td></tr>';
       sec.items.forEach((it, i) => {
-        h += '<tr><td class="r" style="font-style:italic">' + (ROMAN[i] || i + 1) + '</td>' +
-          '<td>' + (editing ? estField('sections.' + s + '.items.' + i + '.name', it.name, { area: true, rows: Math.min(8, Math.max(2, Math.ceil(String(it.name).length / 90))) }) : '<span class="pre">' + esc(it.name) + '</span>') + '</td>' +
-          '<td class="c">' + (editing ? estField('sections.' + s + '.items.' + i + '.area', it.area) : esc(it.area)) + '</td>' +
-          '<td class="c">' + (editing ? estField('sections.' + s + '.items.' + i + '.unit', it.unit) : esc(it.unit)) + '</td>' +
-          '<td class="r">' + (editing ? '<div style="display:flex;gap:4px;align-items:center">' + estField('sections.' + s + '.items.' + i + '.amount', it.amount, { r: true, ph: 'Amt' }) + '<span class="mini">' + estBtn('itemDel', '✕', s, i, 'del') + '</span></div>' : (it.amount ? '₹' + Number(it.amount).toLocaleString('en-IN') : '')) + '</td></tr>';
+        h += '<tr><td style="padding:6px 8px;' + B + ';text-align:right;font-style:italic">' + (ROMAN[i] || i + 1) + '</td>' +
+          '<td style="padding:6px 8px;' + B + '">' + (editing ? estField('sections.' + s + '.items.' + i + '.name', it.name, { area: true, rows: autoRows(it.name) }) : '<span style="white-space:pre-wrap">' + esc(it.name) + '</span>') + '</td>' +
+          '<td style="padding:6px 8px;' + B + ';text-align:center">' + (editing ? estField('sections.' + s + '.items.' + i + '.area', it.area) : esc(it.area)) + '</td>' +
+          '<td style="padding:6px 8px;' + B + ';text-align:center">' + (editing ? estField('sections.' + s + '.items.' + i + '.unit', it.unit) : esc(it.unit)) + '</td>' +
+          '<td style="padding:6px 8px;' + B + ';text-align:right">' + (editing ? '<div style="display:flex;gap:4px;align-items:center">' + estField('sections.' + s + '.items.' + i + '.amount', it.amount, { ph: 'Amt' }) + estBtn('itemDel', icon('trash'), s, i, 'danger') + '</div>' : (it.amount ? '₹' + Number(it.amount).toLocaleString('en-IN') : '')) + '</td></tr>';
       });
       const st = estItemsTotal(sec.items);
-      h += '<tr class="tot-row"><td colspan="4" class="r">Total</td><td class="r"><span id="est-st-' + s + '">' + estMoney(st) + '</span></td></tr>';
+      h += '<tr style="background:#f9f9f9;font-weight:bold"><td colspan="4" style="padding:6px 8px;' + B + ';text-align:right">Total</td><td style="padding:6px 8px;' + B + ';text-align:right"><span id="est-st-' + s + '">' + estMoney(st) + '</span></td></tr>';
     });
-    h += '</tbody></table>';
-    if (editing) h += '<div class="mini" style="margin-top:8px">' + estBtn('secAdd', '+ Add section', undefined, undefined, 'add') + '</div>';
+    h += '</tbody></table></div>';
 
-    h += '<div class="band"><span>Material Specifications / Makes</span>' + (editing ? '<span class="mini">' + estBtn('specAdd', '+ Add spec', undefined, undefined, 'add') + '</span>' : '') + '</div>' +
-      '<table style="font-size:12px"><thead><tr><th style="width:30px">#</th><th style="width:160px">Category</th><th>Details / Brand</th>' + (editing ? '<th style="width:40px"></th>' : '') + '</tr></thead><tbody>' +
-      e.specs.map((x, i) => '<tr><td class="c">' + (i + 1) + '</td><td style="font-weight:600">' + (editing ? estField('specs.' + i + '.cat', x.cat) : esc(x.cat)) + '</td><td class="pre">' + (editing ? estField('specs.' + i + '.detail', x.detail, { area: true, rows: 3 }) : esc(x.detail)) + '</td>' +
-        (editing ? '<td class="c"><span class="mini">' + estBtn('specDel', '✕', i, undefined, 'del') + '</span></td>' : '') + '</tr>').join('') + '</tbody></table>';
+    const band = (title, btn, bg) => '<div style="background:' + (bg || '#e9e9e9') + ';' + B + ';padding:6px 8px;font-weight:bold;font-size:13px;display:flex;justify-content:space-between;align-items:center"><span>' + title + '</span>' + (btn || '') + '</div>';
+    h += '<div style="margin-top:20px">' + band('Material Specifications / Makes', editing ? estBtn('specAdd', '+ Add Spec') : '') +
+      '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#f2f2f2"><th style="padding:6px 8px;' + B + ';width:30px">#</th><th style="padding:6px 8px;' + B + ';width:160px">Category</th><th style="padding:6px 8px;' + B + '">Details / Brand</th>' + (editing ? '<th style="padding:6px 8px;' + B + ';width:60px">Action</th>' : '') + '</tr></thead><tbody>' +
+      e.specs.map((x, i) => '<tr><td style="padding:5px 8px;' + B + ';text-align:center">' + (i + 1) + '</td><td style="padding:5px 8px;' + B + ';font-weight:600">' + (editing ? estField('specs.' + i + '.cat', x.cat, { ph: 'Category' }) : esc(x.cat)) + '</td>' +
+        '<td style="padding:5px 8px;' + B + ';white-space:pre-wrap">' + (editing ? estField('specs.' + i + '.detail', x.detail, { area: true, rows: autoRows(x.detail) + 1, ph: 'Brand / Details' }) : esc(x.detail)) + '</td>' +
+        (editing ? '<td style="padding:5px 8px;' + B + ';text-align:center">' + estBtn('specDel', icon('trash'), i, undefined, 'danger') + '</td>' : '') + '</tr>').join('') + '</tbody></table></div>';
 
-    h += '<div class="band"><span>Basic Terms &amp; Conditions</span>' + (editing ? '<span class="mini">' + estBtn('termAdd', '+ Add term', undefined, undefined, 'add') + '</span>' : '') + '</div>' +
-      '<table style="font-size:12px"><tbody>' + e.terms.map((t, i) => '<tr><td class="c" style="width:30px;font-weight:700">' + esc(t.label) + '</td><td>' +
-        (editing ? '<div style="display:flex;gap:6px">' + estField('terms.' + i + '.text', t.text, { area: true, rows: 2 }) + '<span class="mini">' + estBtn('termDel', '✕', i, undefined, 'del') + '</span></div>' : '<span class="pre">' + esc(t.text) + '</span>') + '</td></tr>').join('') + '</tbody></table>';
+    h += '<div style="margin-top:20px">' + band('Basic Terms &amp; Conditions', editing ? estBtn('termAdd', '+ Add Term') : '') +
+      '<table style="width:100%;border-collapse:collapse;font-size:12px"><tbody>' + e.terms.map((t, i) => '<tr><td style="padding:5px 8px;' + B + ';width:30px;text-align:center;font-weight:700">' + esc(t.label) + '</td><td style="padding:5px 8px;' + B + '">' +
+        (editing ? '<div style="display:flex;gap:6px;align-items:flex-start">' + estField('terms.' + i + '.text', t.text, { area: true, rows: autoRows(t.text) }) + estBtn('termDel', icon('trash'), i, undefined, 'danger') + '</div>' : '<span style="white-space:pre-wrap">' + esc(t.text) + '</span>') + '</td></tr>').join('') + '</tbody></table></div>';
 
-    if (c.bankAccount || c.bankName || c.bankIfsc) {
-      h += '<div class="band bank">Bank Details:-</div><table style="font-size:12px"><tbody>' +
-        '<tr><td>Name: <strong>' + esc(c.name || 'Urbane Living') + '</strong></td></tr>' +
-        (c.bankAccount ? '<tr><td>Account no.: <strong>' + esc(c.bankAccount) + '</strong></td></tr>' : '') +
-        (c.bankIfsc ? '<tr><td>IFSC Code: <strong>' + esc(c.bankIfsc) + '</strong></td></tr>' : '') +
-        (c.bankName ? '<tr><td>Bank Name: <strong>' + esc(c.bankName) + '</strong></td></tr>' : '') + '</tbody></table>';
-    } else if (isAdmin()) {
-      h += '<p class="no-print" style="color:#c00000;font-size:12px;margin-top:16px">Bank details are empty — add them in Settings → Company so they print on estimates.</p>';
-    }
+    h += '<div style="margin-top:20px">' + band('Bank Details:-', '', '#f9c78c') + '<table style="width:100%;border-collapse:collapse;font-size:12px"><tbody>' +
+      '<tr><td style="padding:5px 8px;' + B + '">Name: <strong>' + esc(c.name || 'Urbane Living') + '</strong></td></tr>' +
+      '<tr><td style="padding:5px 8px;' + B + '">Account no.: <strong>' + esc(c.bankAccount || '') + '</strong></td></tr>' +
+      '<tr><td style="padding:5px 8px;' + B + '">IFSC Code: <strong>' + esc(c.bankIfsc || '') + '</strong></td></tr>' +
+      '<tr><td style="padding:5px 8px;' + B + '">Bank Name: <strong>' + esc(c.bankName || '') + '</strong></td></tr></tbody></table></div>';
     return h + '</div></div>';
   }
 
-  function estEditor() {
-    const e = S.est;
-    const editable = canEditEst(e.estimateNo);
-    const versions = e.estimateNo ? estVersions(e.estimateNo) : [];
-    const printing = !!S.estPrint;
-    const editing = e.editing && !printing;
-    let h = '<a class="back no-print" href="#/estimates" data-act="est-back">' + icon('back') + 'Estimates</a>';
-    h += '<div class="est-toolbar no-print"><div class="group">';
-    if (editing) {
-      if (e.id) h += '<button class="btn primary" data-act="est-save" data-mode="update">' + icon('pay') + 'Save update (V' + ((versions.length ? versions[versions.length - 1].version : e.version) + 1) + ')</button>';
-      h += '<button class="btn' + (e.id ? '' : ' primary') + '" data-act="est-save" data-mode="new">' + icon('plus') + (e.id ? 'Save as new estimate' : 'Save estimate') + '</button>';
-      h += '<button class="btn" data-act="est-cancel">Cancel</button>';
-    } else {
-      if (editable) h += '<button class="btn primary" data-act="est-edit">' + icon('edit') + 'Edit estimate</button>';
-      h += '<button class="btn" data-act="est-copy">' + icon('plus') + 'Copy as new</button>';
-    }
-    h += '<a class="btn" href="#/estimates/new" data-act="est-blank">New blank</a>';
-    h += '</div><div class="group">';
-    if (e.id && (editable || canWrite())) {
-      h += '<select class="input" style="width:auto" data-act-change="est-status" aria-label="Status">' + EST_STATUS.map((x) => '<option' + (x === e.status ? ' selected' : '') + '>' + x + '</option>').join('') + '</select>';
-    }
-    if (e.id && canWrite()) {
-      const linked = e.clientId && byId('Clients', e.clientId);
-      h += linked ? '<a class="btn" href="#/clients/' + encodeURIComponent(e.clientId) + '">' + icon('clients') + 'Open client</a>'
-        : '<button class="btn" data-act="est-client">' + icon('clients') + 'Create client</button>';
-    }
-    if (isAdmin() && !editing) h += '<button class="btn" data-act="est-template" title="New estimates will start from this one">Use as template</button>';
-    h += '<button class="btn primary" data-act="est-print">' + icon('print') + 'Download PDF</button>';
-    if (e.id && editable && !editing) h += '<button class="btn ghost icon danger" title="Delete this version" data-act="est-del">' + icon('trash') + '</button>';
-    h += '</div></div>';
-    if (versions.length > 1) {
-      h += '<div class="chips no-print">' + versions.map((v) => '<a class="badge' + (v.id === e.id ? ' accent' : '') + '" href="#/estimates/' + encodeURIComponent(v.id) + '">' + (v.version === 1 ? 'Original' : 'V' + v.version) + ' · ' + esc(fmtDate(v.updatedAt ? v.updatedAt.slice(0, 10) : v.estimateDate)) + '</a>').join('') + '</div>';
-    }
-    if (!editing) {
-      h += '<div class="est-lock no-print">🔒 View mode. ' + (editable ? 'Click <b>Edit estimate</b> to change it — saving creates a new version and the original stays in history.' : 'Only ' + esc(userName(estOwner(e.estimateNo))) + ' or an Admin can edit this estimate. Use <b>Copy as new</b> to start your own from it.') + '</div>';
-    }
-    h += estDocHtml(e, editing);
-    if (e.logs && e.logs.length) {
-      h += '<div class="card no-print" style="max-width:850px;margin:16px auto 0"><div class="card-head"><h2>Edit history</h2></div><div class="card-body est-logs">' +
-        e.logs.map((l) => '<div style="padding:4px 0;border-bottom:1px solid var(--border)"><span class="muted">' + esc(fmtStamp(l.time) || l.time) + '</span> · <b>' + esc(userName(l.user)) + '</b> · ' + esc(l.action) + '</div>').join('') + '</div></div>';
-    }
+  function savedListHtml() {
+    const st = ui('estSaved');
+    if (!st.tab) st.tab = 'all';
+    const q = (st.q || '').toLowerCase();
+    const all = (S.estimates || []).slice().sort((a, b) => String(b.createdAt || b.updatedAt).localeCompare(String(a.createdAt || a.updatedAt)));
+    const originals = all.filter((r) => r.version === 1);
+    const updated = all.filter((r) => r.version > 1);
+    const list = (st.tab === 'all' ? originals : updated).filter((r) => String(r.clientName || '').toLowerCase().includes(q));
+    const total = (r) => (num(r.grandTotal) > 0 ? '₹' + num(r.grandTotal).toLocaleString('en-IN') : 'As Actual');
+    let h = '<div class="sp" style="margin-bottom:10px">' +
+      abtn('est-saved-tab', 'All Saved - Original (' + originals.length + ')', st.tab === 'all' ? 'primary' : '', ' data-id="all"') +
+      abtn('est-saved-tab', 'Updated History (' + updated.length + ')', st.tab === 'editable' ? 'primary' : '', ' data-id="editable"') +
+      abtn('est-saved-refresh', 'Refresh') + abtn('est-blank', icon('estimate') + 'New Blank for New Client') + '</div>' +
+      '<input class="ainput" id="saved-q" placeholder="' + (st.tab === 'all' ? 'Search by Client Name' : 'Search Updated by Client Name') + '" value="' + esc(st.q || '') + '" style="margin-bottom:10px">';
+    if (!list.length) return h + '<div class="empty">' + (st.tab === 'all' ? 'No original estimates - Save one!' : 'No updated estimates yet') + '</div>';
+    h += '<div class="alist">' + list.map((r) => '<div class="alist-item"><div style="min-width:0"><div class="t">' +
+      (st.tab === 'all' ? esc(r.estimateNo) + ' - ' + esc(r.clientName || 'Unnamed') + ' (' + esc(fmtEstDate(r.estimateDate)) + ')' : esc(r.estimateNo) + ' - V' + (r.version - 1) + ' - ' + esc(r.clientName)) + '</div>' +
+      '<div class="d">' + (st.tab === 'all' ? 'Client: ' + esc(r.clientName) + ' | Total: ' + total(r) + ' | By: ' + esc(r.createdBy) + ' | ORIGINAL' : 'Updated: ' + esc(fmtStamp(r.updatedAt)) + ' by ' + esc(r.updatedBy) + ' | Total: ' + total(r)) +
+      (r.status && r.status !== 'Draft' ? ' | ' + esc(r.status) : '') + '</div></div><div class="sp">' +
+      abtn('est-saved-open', st.tab === 'all' ? 'Open &amp; Edit' : 'Open', 'primary sm', ' data-id="' + esc(r.id) + '"') +
+      (canEditEst(r.estimateNo) ? abtn('est-saved-del', 'Delete', 'danger sm', ' data-id="' + esc(r.id) + '"') : '') + '</div></div>').join('') + '</div>';
     return h;
+  }
+  function openSaved() {
+    openModal('Saved Estimates', '<div id="saved-body">' + savedListHtml() + '</div>', { wide: true, foot: '' });
+    $('.modal-foot') && $('.modal-foot').remove();
+    bindSavedSearch();
+  }
+  function refreshSaved() {
+    const b = $('#saved-body');
+    if (!b) return;
+    b.innerHTML = savedListHtml();
+    bindSavedSearch();
+  }
+  function bindSavedSearch() {
+    const q = $('#saved-q');
+    if (!q) return;
+    q.addEventListener('input', () => {
+      ui('estSaved').q = q.value;
+      const pos = q.selectionStart;
+      refreshSaved();
+      const n = $('#saved-q');
+      n.focus();
+      try { n.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+    });
+  }
+  function newBlankEstimate() {
+    if (!confirm('Create New Blank Estimate?\n\nCurrent data will be cleared and new Estimate No generated. Unsaved changes will be lost.')) return;
+    closeModal();
+    S.est = blankEstimate();
+    if (route().id) location.hash = '#/estimates'; else renderPage();
+    toast('New blank estimate ready: ' + S.est.tempNo + ' - Now enter new client details');
   }
 
   function estSetPath(obj, path, value) {
@@ -1847,7 +1866,8 @@
 
   async function estSave(mode, btn) {
     const e = S.est;
-    if (!String(e.client.name || '').trim()) return toast('Enter the client name (Bill To) first', true);
+    if (mode === 'update' && !e.id) mode = 'new';
+    if (!String(e.client.name || '').trim()) return toast('Click Edit and enter the Client Name (Bill To) first', true);
     btn.disabled = true;
     try {
       const r = await api('estimateSave', {
@@ -1856,7 +1876,7 @@
       });
       S.estimates = r.estimates;
       S.est = estFromRecord(r.record);
-      toast(mode === 'new' ? 'Estimate ' + r.record.estimateNo + ' saved' : 'Saved as V' + r.record.version + ' — earlier versions are kept');
+      toast(mode === 'new' ? 'Original ' + r.record.estimateNo + ' saved! All users can see now.' : 'Updated V' + (r.record.version - 1) + ' saved! All users can see history.');
       location.hash = '#/estimates/' + encodeURIComponent(r.record.id);
       renderPage();
     } catch (err) {
@@ -2232,6 +2252,97 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Duplicates — same date, party and amount entered twice (e.g. once by hand
+  // and once by the Day Book import), and clients / employees with one name.
+  // ---------------------------------------------------------------------------
+  const normName = (x) => String(x || '').toLowerCase().replace(/\(.*?\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+  const DUP_RULES = [
+    ['Clients', 'Clients with the same name', (r) => normName(r.name), true, (r) => r.name + (r.clientCode ? ' · ' + r.clientCode : '')],
+    ['Employees', 'Employees with the same name', (r) => normName(r.name), true, (r) => r.name + (r.designation ? ' · ' + r.designation : '')],
+    ['ClientPayments', 'Client payments', (r) => [r.date, r.clientId, num(r.amount)].join('|'), false, (r) => fmtDate(r.date) + ' · ' + clientName(r.clientId) + ' · ' + inr(r.amount)],
+    ['ClientWork', 'Site labour / material', (r) => [r.date, r.clientId, r.costType, num(r.amount)].join('|'), false, (r) => fmtDate(r.date) + ' · ' + clientName(r.clientId) + ' · ' + r.costType + ' · ' + inr(r.amount) + (r.description ? ' · ' + r.description : '')],
+    ['OfficeExpenses', 'Office expenses', (r) => [r.date, r.category, num(r.amount)].join('|'), false, (r) => fmtDate(r.date) + ' · ' + r.category + ' · ' + inr(r.amount) + (r.description ? ' · ' + r.description : '')],
+    ['EmployeeExpenses', 'Employee expenses', (r) => [r.date, r.employeeId, r.expenseType, num(r.amount)].join('|'), false, (r) => fmtDate(r.date) + ' · ' + empName(r.employeeId) + ' · ' + r.expenseType + ' · ' + inr(r.amount)],
+    ['SalaryAdvances', 'Salary advances', (r) => [r.date, r.employeeId, num(r.amount)].join('|'), false, (r) => fmtDate(r.date) + ' · ' + empName(r.employeeId) + ' · ' + inr(r.amount)],
+  ];
+  const isImported = (r) => /\[import:/.test(r.notes || '');
+  function linkedCount(table, id) {
+    if (table === 'Clients') return rows('ClientWork').concat(rows('ClientPayments')).filter((x) => x.clientId === id).length;
+    return rows('EmployeeExpenses').concat(rows('SalaryAdvances'), rows('SalaryPayments')).filter((x) => x.employeeId === id).length;
+  }
+  function findDuplicates() {
+    const groups = [];
+    DUP_RULES.forEach(([table, label, key, merge, describe]) => {
+      const by = {};
+      rows(table).forEach((r) => { const k = key(r); if (k) (by[k] = by[k] || []).push(r); });
+      Object.keys(by).filter((k) => by[k].length > 1).forEach((k) => {
+        const list = by[k].slice().sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+        // Different Day Book lines that only share date and amount (e.g. paid to Farman vs Sonu) are not duplicates.
+        if (!merge && list.every(isImported) && new Set(list.map((r) => normName(r.description || r.notes))).size === list.length) return;
+        let keep = list[0];
+        let likely = merge;
+        let why = merge ? 'Same name — linked entries will be moved to the one you keep' : '';
+        if (merge) keep = list.slice().sort((a, b) => linkedCount(table, b.id) - linkedCount(table, a.id))[0];
+        else {
+          const imp = list.filter(isImported);
+          const man = list.filter((r) => !isImported(r));
+          const t = list.map((r) => new Date(r.createdAt || 0).getTime());
+          if (imp.length && man.length) { likely = true; keep = imp[0]; why = 'Entered by hand and also imported from the Day Book'; }
+          else if (Math.max.apply(null, t) - Math.min.apply(null, t) < 30 * 60000 && !imp.length) { likely = true; why = 'Entered twice within a few minutes'; }
+          else why = imp.length ? 'Separate lines in the Day Book (e.g. 6 chairs bought the same day) — probably genuine' : 'Same date and amount — check before removing';
+        }
+        groups.push({ id: table + ':' + k, table, label, merge, describe, list, keep: keep.id, likely, why });
+      });
+    });
+    return groups;
+  }
+
+  function duplicatesHtml() {
+    const groups = findDuplicates();
+    const st = ui('dups');
+    if (!st.sel) st.sel = {};
+    if (!st.keep) st.keep = {};
+    groups.forEach((g) => { if (!(g.id in st.sel)) st.sel[g.id] = g.likely; if (!st.keep[g.id]) st.keep[g.id] = g.keep; });
+    if (!groups.length) return '<div class="card"><div class="empty">No duplicates found 🎉</div></div>';
+    const n = groups.filter((g) => st.sel[g.id]).reduce((a, g) => a + g.list.length - 1, 0);
+    let h = '<p class="muted" style="margin-top:0">' + groups.length + ' groups look alike. Ticked groups are very likely double entries; the others may be genuine — tick them only if you are sure. In each group, choose which entry to keep.</p>' +
+      '<div class="filters"><button class="btn primary" data-act="dup-run"' + (n ? '' : ' disabled') + '>' + icon('trash') + 'Remove ' + n + ' duplicate' + (n === 1 ? '' : 's') + '</button></div>';
+    h += groups.map((g) => '<div class="card" style="margin-bottom:10px"><div class="card-body">' +
+      '<label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer"><input type="checkbox" data-dup-sel="' + esc(g.id) + '"' + (st.sel[g.id] ? ' checked' : '') + ' style="margin-top:3px">' +
+      '<div><b>' + esc(g.label) + '</b> <span class="badge ' + (g.likely ? 'warn' : '') + '">' + (g.likely ? 'Likely duplicate' : 'Check') + '</span><div class="small muted">' + esc(g.why) + '</div></div></label>' +
+      '<div style="margin:8px 0 0 26px">' + g.list.map((r) => '<label style="display:flex;gap:8px;align-items:center;padding:4px 0;font-size:13px"><input type="radio" name="keep-' + esc(g.id) + '" data-dup-keep="' + esc(g.id) + '" value="' + esc(r.id) + '"' + (st.keep[g.id] === r.id ? ' checked' : '') + '>' +
+        '<span>' + esc(g.describe(r)) + ' <span class="muted">· ' + (isImported(r) ? 'Day Book import' : 'added by ' + esc(userName(r.createdBy))) + (g.merge ? ' · ' + linkedCount(g.table, r.id) + ' linked entries' : '') + '</span>' + (st.keep[g.id] === r.id ? ' <span class="badge good">keep</span>' : '') + '</span></label>').join('') + '</div>' +
+      '</div></div>').join('');
+    return h;
+  }
+
+  async function runDuplicates(btn) {
+    const st = ui('dups');
+    const groups = findDuplicates().filter((g) => st.sel[g.id]);
+    if (!groups.length || !confirm('Remove the duplicates in ' + groups.length + ' groups? This cannot be undone.')) return;
+    btn.disabled = true;
+    btn.textContent = 'Removing…';
+    let removed = 0;
+    const errors = [];
+    const byTable = {};
+    for (const g of groups) {
+      const keep = st.keep[g.id] || g.keep;
+      const others = g.list.map((r) => r.id).filter((id) => id !== keep);
+      if (g.merge) {
+        try { const r = await api('mergeRecords', { table: g.table, keepId: keep, removeIds: others }); removed += r.removed; } catch (e) { errors.push(g.describe(g.list[0]) + ': ' + e.message); }
+      } else (byTable[g.table] = byTable[g.table] || []).push(...others);
+    }
+    for (const t of Object.keys(byTable)) {
+      try { const r = await api('removeMany', { table: t, ids: byTable[t] }); removed += r.removed; } catch (e) { errors.push(t + ': ' + e.message); }
+    }
+    S.ui.dups = {};
+    await loadAll();
+    toast(removed + ' duplicate entries removed' + (errors.length ? ' · ' + errors.length + ' could not be removed' : ''), !!errors.length);
+    if (errors.length) alert(errors.join('\n'));
+    renderPage();
+  }
+
+  // ---------------------------------------------------------------------------
   // Settings
   // ---------------------------------------------------------------------------
   const LIST_LABELS = {
@@ -2242,7 +2353,7 @@
   function viewSettings() {
     const st = ui('settings');
     const items = [['profile', 'My profile']];
-    if (canWrite()) items.push(['lists', 'Dropdown lists']);
+    if (canWrite()) items.push(['lists', 'Dropdown lists'], ['duplicates', 'Duplicates', findDuplicates().length]);
     if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['attendance', 'Attendance'], ['import', 'Import data'], ['activity', 'Activity log']);
     if (!items.some((i) => i[0] === st.tab)) st.tab = 'profile';
     let h = pageHead('Settings', '');
@@ -2250,7 +2361,7 @@
 
     if (st.tab === 'profile') {
       const u = S.user;
-      h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Profile</h2></div><div class="card-body"><div class="breakdown">' +
+      h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Profile</h2><a href="#/me">My account →</a></div><div class="card-body"><div class="breakdown">' +
         '<span class="muted">Name</span><span>' + esc(u.name) + '</span><span class="muted">Email</span><span>' + esc(u.email) + '</span>' +
         '<span class="muted">Designation</span><span>' + esc(u.designation) + '</span><span class="muted">Access</span><span>' + statusBadge(u.role) + '</span></div>' +
         '<p class="small muted" style="margin-bottom:0">Admin (CEO, COO, VP Sales, IT): everything · Accountant: accounts + own estimates · Viewer: read-only accounts · Staff: own estimates and attendance</p></div></div>' +
@@ -2286,6 +2397,8 @@
         '<label class="field">Last estimate counter<input class="input" name="estimateCounter" type="number" value="' + esc(S.settings.estimateCounter) + '"><span class="field-hint">The next estimate gets this + 1. Set it above the last number used on the old estimate page.</span></label>' +
         (S.settings.estimateTemplate ? '<button type="button" class="btn sm" data-act="tpl-reset" style="align-self:flex-start">Reset estimate template to default</button>' : '') +
         '</div></div></div><button class="btn primary" type="submit">Save</button></form>';
+    } else if (st.tab === 'duplicates') {
+      h += duplicatesHtml();
     } else if (st.tab === 'attendance') {
       const a = S.settings.attendance;
       h += '<form id="att-form"><div class="two-col"><div class="card"><div class="card-head"><h2>Office network</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:14px">' +
@@ -2304,7 +2417,7 @@
     } else if (st.tab === 'import') {
       const imps = S.settings.imports || [];
       h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Import from a file</h2></div><div class="card-body">' +
-        '<p class="muted" style="margin-top:0">Choose an Account Master import file (<code>.json</code>). You will see what it contains before anything is saved. Every imported row is tagged, so the whole import can be undone.</p>' +
+        '<p class="muted" style="margin-top:0">Choose an Urbane Living import file (<code>.json</code>). You will see what it contains before anything is saved. Every imported row is tagged, so the whole import can be undone.</p>' +
         '<input class="input" type="file" accept=".json,application/json" id="import-file" style="height:auto;padding:8px">' +
         '<div id="import-preview" style="margin-top:14px"></div></div></div>' +
         '<div class="card"><div class="card-head"><h2>Past imports</h2></div><div class="card-body">' +
@@ -2368,7 +2481,7 @@
         rd.onload = () => {
           let d;
           try { d = JSON.parse(rd.result); } catch (err) { $('#import-preview').innerHTML = '<div class="form-error">This file is not valid JSON.</div>'; return; }
-          if (!d || d.format !== 'account-master-import') { $('#import-preview').innerHTML = '<div class="form-error">This is not an Account Master import file.</div>'; return; }
+          if (!d || d.format !== 'account-master-import') { $('#import-preview').innerHTML = '<div class="form-error">This is not an Urbane Living import file.</div>'; return; }
           S.pendingImport = d;
           const rows = [
             ['Employees (added or updated)', (d.employees || []).length, ''],
@@ -2538,20 +2651,26 @@
       case 'print': window.print(); break;
       case 'open-est': if (!e.target.closest('button, a')) location.hash = '#/estimates/' + encodeURIComponent(el.dataset.id); break;
       case 'est-op': estOp(el.dataset.op, Number(el.dataset.s), Number(el.dataset.i)); break;
-      case 'est-edit': S.est.editing = true; S.est.newLogs = []; renderPage(); break;
-      case 'est-cancel':
-        if (S.est.dirty && !confirm('Discard your changes?')) break;
-        if (S.est.id) { const id = S.est.id; S.est = null; S.estError = null; location.hash = '#/estimates/' + encodeURIComponent(id); renderPage(); } else { S.est = null; location.hash = '#/estimates'; }
+      case 'est-edit': S.est.editing = true; S.est.newLogs = ['Started Editing']; toast('Edit Mode ON'); renderPage(); break;
+      case 'est-canceledit': S.est.editing = false; renderPage(); break;
+      case 'est-blank': e.preventDefault(); newBlankEstimate(); break;
+      case 'est-saved': openSaved(); break;
+      case 'est-saved-tab': ui('estSaved').tab = el.dataset.id; ui('estSaved').q = ''; refreshSaved(); break;
+      case 'est-saved-refresh':
+        el.disabled = true;
+        try { const r = await api('estimatesList'); S.estimates = r.estimates; refreshSaved(); } catch (err) { toast(err.message, true); el.disabled = false; }
         break;
-      case 'est-back': case 'est-blank':
-        if (S.est && S.est.editing && S.est.dirty && !confirm('Discard your changes?')) { e.preventDefault(); break; }
-        if (act === 'est-blank') { e.preventDefault(); S.est = blankEstimate(); location.hash = '#/estimates/new'; renderPage(); }
-        break;
-      case 'est-copy': {
-        const c = S.est;
-        S.est = Object.assign(blankEstimate(), { client: clone(c.client), sections: clone(c.sections), specs: clone(c.specs), terms: clone(c.terms), newLogs: ['Copied from ' + c.estimateNo + ' V' + c.version], dirty: true });
-        location.hash = '#/estimates/new';
-        renderPage();
+      case 'est-saved-open': closeModal(); S.est = null; S.estError = null; location.hash = '#/estimates/' + encodeURIComponent(el.dataset.id); break;
+      case 'est-saved-del': {
+        const r0 = (S.estimates || []).find((x) => x.id === el.dataset.id);
+        if (!r0 || !confirm('Delete ' + r0.estimateNo + (r0.version > 1 ? ' V' + (r0.version - 1) : ' (original)') + '?')) break;
+        try {
+          const r = await api('estimateDelete', { id: r0.id });
+          S.estimates = r.estimates;
+          if (S.est && S.est.id === r0.id) { S.est.id = ''; }
+          toast(r0.version > 1 ? 'Deleted Updated version' : 'Deleted Original');
+          refreshSaved();
+        } catch (err) { toast(err.message, true); }
         break;
       }
       case 'est-save': estSave(el.dataset.mode, el); break;
@@ -2561,6 +2680,7 @@
         try { const r = await api('estimateDelete', { id: S.est.id }); S.estimates = r.estimates; S.est = null; toast('Deleted'); location.hash = '#/estimates'; } catch (err) { toast(err.message, true); }
         break;
       case 'est-client':
+        e.preventDefault();
         if (!confirm('Create a client from ' + S.est.estimateNo + ' with approved amount ' + inr(estGrand(S.est)) + '?')) break;
         try {
           const r = await api('estimateToClient', { estimateNo: S.est.estimateNo });
@@ -2573,6 +2693,7 @@
         } catch (err) { toast(err.message, true); }
         break;
       case 'est-template':
+        e.preventDefault();
         if (!confirm('Make this estimate the starting template for every new estimate? (Amounts are cleared.)')) break;
         try {
           const tpl = { sections: clone(S.est.sections).map((x) => ({ title: x.title, items: x.items.map((i) => Object.assign(i, { amount: '' })) })), specs: clone(S.est.specs), terms: clone(S.est.terms) };
@@ -2581,7 +2702,9 @@
           toast('Template saved');
         } catch (err) { toast(err.message, true); }
         break;
-      case 'est-firebase': openFirebaseImport(); break;
+      case 'dup-run': runDuplicates(el); break;
+      case 'go-dups': ui('settings').tab = 'duplicates'; break;
+      case 'est-firebase': e.preventDefault(); openFirebaseImport(); break;
       case 'photo-remove': if (confirm('Remove your photo?')) { try { await savePhoto(''); toast('Photo removed'); } catch (err) { toast(err.message, true); } } break;
       case 'me-month': ui('me').month = el.dataset.id; renderPage(); window.scrollTo(0, 0); break;
       case 'tpl-reset':
@@ -2638,6 +2761,11 @@
   document.addEventListener('input', (e) => {
     if (e.target.matches('input[type=search][data-filter]')) onFilter(e);
     if (e.target.matches('[data-ep]')) estOnInput(e.target);
+  });
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.dataset.dupSel) { ui('dups').sel[t.dataset.dupSel] = t.checked; renderPage(); }
+    if (t.dataset.dupKeep) { ui('dups').keep[t.dataset.dupKeep] = t.value; renderPage(); }
   });
   document.addEventListener('change', async (e) => {
     if (!e.target.matches('[data-act-change=est-status]')) return;
@@ -2798,6 +2926,14 @@
           const mine = (t) => (emp ? db.tables[t].filter((r) => r.employeeId === emp.id) : []);
           const me = emp ? { employee: emp, expenses: mine('EmployeeExpenses'), advances: mine('SalaryAdvances'), payments: mine('SalaryPayments') } : { employee: null };
           return { ok: true, me: me, user: pub(user), settings: db.settings, data: JSON.parse(JSON.stringify(db.tables)), users: db.users.map(pub), estimates: est, attendanceToday: db.attendance.find((r) => r.email === user.email && r.date === today()) || null };
+        }
+        case 'estimatesList': return { ok: true, estimates: (db.estimates || []).map((r) => { const x = Object.assign({}, r); delete x.data; delete x.logs; return x; }) };
+        case 'removeMany': db.tables[req.table] = db.tables[req.table].filter((x) => !req.ids.includes(x.id)); save(); return { ok: true, removed: req.ids.length };
+        case 'mergeRecords': {
+          const col = req.table === 'Clients' ? 'clientId' : 'employeeId';
+          Object.keys(db.tables).forEach((t) => db.tables[t].forEach((r) => { if (req.removeIds.includes(r[col])) r[col] = req.keepId; }));
+          db.tables[req.table] = db.tables[req.table].filter((x) => !req.removeIds.includes(x.id)); save();
+          return { ok: true, removed: req.removeIds.length, moved: 0 };
         }
         case 'setPhoto': user.photo = req.photo; save(); return { ok: true, photo: req.photo };
         case 'estimateGet': { const r = (db.estimates || []).find((x) => x.id === req.id); return r ? { ok: true, record: JSON.parse(JSON.stringify(r)) } : fail('Estimate not found'); }

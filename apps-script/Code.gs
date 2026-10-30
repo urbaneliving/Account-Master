@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-02.1';
+const API_VERSION = '2026-11-03.1';
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
 const SESSION_DAYS = 7;
 const MAX_LOGIN_FAILS = 5;
@@ -103,7 +103,7 @@ const DEFAULT_SETTINGS = {
     name: 'Urbane Living', perKmRate: 3, website: 'urbaneliving.in', gstNo: '09AAJFU0647A1ZC',
     address: 'G-12, Express Green Plaza, Sector-1, Vaishali, Ghaziabad', serviceArea: 'Gurugram, Noida, Delhi, Ghaziabad',
     logoUrl: '',
-    bankName: '', bankAccount: '', bankIfsc: '', estimatePrefix: 'RFIUL', estimateValidDays: 14,
+    bankName: 'Federal Bank', bankAccount: '21500200007494', bankIfsc: 'FDRL0002150', estimatePrefix: 'RFIUL', estimateValidDays: 14,
   },
   attendance: { ipPrefixes: ['2406:b400:71:93ee'], startTime: '10:00', autoMark: true, geo: { enabled: false, lat: '', lng: '', radius: 200 } },
   estimateCounter: 226,
@@ -175,6 +175,9 @@ function route_(req) {
     case 'undoImport': return undoImport_(user, req.tag);
     case 'setHiddenTabs': return setHiddenTabs_(user, req.tabs);
     case 'setPhoto': return setPhoto_(user, req.photo);
+    case 'estimatesList': return { estimates: estimatesList_(user) };
+    case 'removeMany': return removeMany_(user, req.table, req.ids);
+    case 'mergeRecords': return mergeRecords_(user, req.table, req.keepId, req.removeIds);
     case 'estimateGet': return { record: estimateGet_(user, req.id) };
     case 'estimateSave': return estimateSave_(user, req.record, req.mode);
     case 'estimateDelete': return estimateDelete_(user, req.id);
@@ -447,6 +450,79 @@ function summary_(rec) {
   return ['name', 'clientCode', 'date', 'salaryMonth', 'category', 'costType', 'expenseType', 'amount', 'paidAmount']
     .filter(function (k) { return rec[k] !== undefined && rec[k] !== ''; })
     .map(function (k) { return k + '=' + rec[k]; }).join(', ');
+}
+
+// ---------------------------------------------------------------------------
+// Duplicates: bulk delete, and merge of duplicate clients / employees (their
+// linked records are moved to the record that is kept).
+// ---------------------------------------------------------------------------
+const MERGE_REFS = {
+  Clients: [['ClientWork', 'clientId'], ['ClientPayments', 'clientId'], ['EmployeeExpenses', 'clientId'], ['Estimates', 'clientId']],
+  Employees: [['EmployeeExpenses', 'employeeId'], ['SalaryAdvances', 'employeeId'], ['SalaryPayments', 'employeeId'], ['Users', 'employeeId']],
+};
+
+function removeMany_(user, table, ids) {
+  const def = SCHEMA[table];
+  if (!def || !def.editable) throw err_('Invalid table');
+  needRole_(user, WRITE_ROLES);
+  ids = (ids || []).map(String);
+  const blocked = {};
+  (CHILDREN[table] || []).forEach(function (c) {
+    readTable_(c[0]).forEach(function (r) { if (ids.indexOf(r[c[1]]) >= 0) blocked[r[c[1]]] = true; });
+  });
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let removed = 0;
+  try {
+    const sh = sheet_(table);
+    const values = sh.getDataRange().getValues();
+    const idCol = values[0].map(String).indexOf('id');
+    for (let i = values.length - 1; i >= 1; i--) {
+      const id = String(values[i][idCol]);
+      if (ids.indexOf(id) >= 0 && !blocked[id]) { sh.deleteRow(i + 1); removed++; }
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  audit_(user, 'delete duplicates', table, '', removed + ' rows');
+  return { removed: removed, skipped: Object.keys(blocked).length };
+}
+
+function mergeRecords_(user, table, keepId, removeIds) {
+  needRole_(user, WRITE_ROLES);
+  if (!MERGE_REFS[table]) throw err_('Only clients and employees can be merged');
+  removeIds = (removeIds || []).map(String).filter(function (id) { return id && id !== keepId; });
+  if (!readTable_(table).some(function (r) { return r.id === keepId; })) throw err_('Record to keep not found');
+  if (table === 'Employees') {
+    const months = {};
+    readTable_('SalaryPayments').forEach(function (p) {
+      if (p.employeeId !== keepId && removeIds.indexOf(p.employeeId) < 0) return;
+      if (months[p.salaryMonth]) throw err_('Both records have a salary payment for ' + p.salaryMonth + ' — delete one of those payments first');
+      months[p.salaryMonth] = true;
+    });
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let moved = 0;
+  try {
+    MERGE_REFS[table].forEach(function (ref) {
+      const sh = sheet_(ref[0]);
+      const values = sh.getDataRange().getValues();
+      const col = values[0].map(String).indexOf(ref[1]);
+      if (col < 0 || values.length < 2) return;
+      let changed = false;
+      const colVals = values.slice(1).map(function (r) {
+        if (removeIds.indexOf(String(r[col])) >= 0) { changed = true; moved++; return [keepId]; }
+        return [r[col]];
+      });
+      if (changed) sh.getRange(2, col + 1, colVals.length, 1).setValues(colVals);
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  const r = removeMany_(user, table, removeIds);
+  audit_(user, 'merge', table, keepId, 'Merged ' + removeIds.length + ' duplicate(s), moved ' + moved + ' linked rows');
+  return { moved: moved, removed: r.removed };
 }
 
 // ---------------------------------------------------------------------------
