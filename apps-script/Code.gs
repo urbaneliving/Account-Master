@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-10-31.1';
+const API_VERSION = '2026-10-31.2';
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
 const SESSION_DAYS = 7;
 const MAX_LOGIN_FAILS = 5;
@@ -92,6 +92,8 @@ const CHILDREN = {
 const DEFAULT_SETTINGS = {
   company: { name: 'Urbane Living', perKmRate: 3 },
   employeeSource: null,
+  imports: [],
+  hiddenTabs: [],
   lists: {
     projectTypes: ['Residential', 'Commercial', 'Office', 'Showroom', 'Restaurant', 'Other'],
     clientStatus: ['Ongoing', 'Completed', 'On Hold', 'Cancelled'],
@@ -147,11 +149,14 @@ function route_(req) {
     case 'resetPassword': return resetPassword_(user, req.id, req.password);
     case 'saveSettings': return saveSettings_(user, req.settings);
     case 'audit': return { rows: auditRows_(user, req.limit) };
-    case 'sheetTabs': return sheetTabs_(req.name);
+    case 'sheetTabs': return sheetTabs_(req.name, user.role === 'Admin');
     case 'sheetRowSave': return sheetRowSave_(user, req.name, req.row, req.values, req.original);
     case 'sheetRowDelete': return sheetRowDelete_(user, req.name, req.row, req.original);
     case 'sheetAddColumn': return sheetAddColumn_(user, req.name, req.headerRow, req.label);
     case 'importEmployees': return importEmployees_(user, req.records, req.source);
+    case 'importBatch': return importBatch_(user, req.data);
+    case 'undoImport': return undoImport_(user, req.tag);
+    case 'setHiddenTabs': return setHiddenTabs_(user, req.tabs);
     default: throw err_('Unknown action: ' + req.action);
   }
 }
@@ -473,6 +478,7 @@ function readSettings_() {
       const v = JSON.parse(r.value);
       if (r.key === 'company') s.company = Object.assign(s.company, v);
       else if (r.key === 'employeeSource') s.employeeSource = v;
+      else if ((r.key === 'imports' || r.key === 'hiddenTabs') && Array.isArray(v)) s[r.key] = v;
       else if (r.key.indexOf('list.') === 0 && Array.isArray(v)) s.lists[r.key.slice(5)] = v;
     } catch (e) { /* ignore malformed values */ }
   });
@@ -533,10 +539,11 @@ function cleanSource_(src, lastSync) {
 // ---------------------------------------------------------------------------
 // Other tabs in the spreadsheet (read-only view of data the app doesn't manage)
 // ---------------------------------------------------------------------------
-function sheetTabs_(name) {
+function sheetTabs_(name, isAdmin) {
   const ss = ss_();
+  const hidden = readSettings_().hiddenTabs;
   const tabs = ss.getSheets().map(function (sh) { return sh.getName(); })
-    .filter(function (n) { return !(n in SCHEMA); });
+    .filter(function (n) { return !(n in SCHEMA) && (isAdmin || hidden.indexOf(n) < 0); });
   if (!name || tabs.indexOf(name) < 0) name = tabs[0] || '';
   if (!name) return { tabs: tabs, name: '', rows: [] };
   const sh = ss.getSheetByName(name);
@@ -546,9 +553,10 @@ function sheetTabs_(name) {
   return { tabs: tabs, name: name, rows: rows };
 }
 
-function editableTab_(name) {
+function editableTab_(name, user) {
   name = String(name || '');
   if (!name || name in SCHEMA) throw err_('This tab cannot be edited here');
+  if (user && user.role !== 'Admin' && readSettings_().hiddenTabs.indexOf(name) >= 0) throw err_('This tab is hidden by Admin', 'FORBIDDEN');
   const sh = ss_().getSheetByName(name);
   if (!sh) throw err_('Tab "' + name + '" not found');
   return sh;
@@ -570,7 +578,7 @@ function checkRow_(sh, row, original) {
 
 function sheetRowSave_(user, name, row, values, original) {
   needRole_(user, WRITE_ROLES);
-  const sh = editableTab_(name);
+  const sh = editableTab_(name, user);
   values = cleanValues_(values);
   if (!values.length || !values.some(String)) throw err_('Row is empty');
   const lock = LockService.getScriptLock();
@@ -594,7 +602,7 @@ function sheetRowSave_(user, name, row, values, original) {
 
 function sheetRowDelete_(user, name, row, original) {
   needRole_(user, WRITE_ROLES);
-  const sh = editableTab_(name);
+  const sh = editableTab_(name, user);
   row = Number(row) || 0;
   if (row < 1) throw err_('Invalid row');
   const lock = LockService.getScriptLock();
@@ -611,7 +619,7 @@ function sheetRowDelete_(user, name, row, original) {
 
 function sheetAddColumn_(user, name, headerRow, label) {
   needRole_(user, WRITE_ROLES);
-  const sh = editableTab_(name);
+  const sh = editableTab_(name, user);
   label = String(label || '').trim();
   if (!label) throw err_('Column name is required');
   headerRow = Math.max(1, Number(headerRow) || 1);
@@ -619,6 +627,165 @@ function sheetAddColumn_(user, name, headerRow, label) {
   sh.getRange(headerRow, col).setValue(label);
   audit_(user, 'update', 'Sheet: ' + name, 'column ' + col, 'Added column ' + label);
   return {};
+}
+
+function setHiddenTabs_(user, tabs) {
+  needRole_(user, ['Admin']);
+  tabs = (tabs || []).map(String).filter(String);
+  writeSettings_(user, [['hiddenTabs', tabs]]);
+  audit_(user, 'update', 'Settings', '', 'Hidden tabs: ' + (tabs.join(', ') || 'none'));
+  return { settings: readSettings_() };
+}
+
+// ---------------------------------------------------------------------------
+// Bulk import (Settings → Import data). Every imported row carries the batch
+// tag in its notes so the whole batch can be undone.
+// ---------------------------------------------------------------------------
+const IMPORT_TABLES = ['ClientWork', 'ClientPayments', 'OfficeExpenses', 'SalaryAdvances', 'SalaryPayments'];
+
+function tagOf_(tag) { return '[import:' + tag + ']'; }
+
+function appendRows_(table, objs) {
+  if (!objs.length) return;
+  const sh = sheet_(table);
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  const types = types_(table);
+  const start = sh.getLastRow() + 1;
+  const need = start + objs.length - 1 - sh.getMaxRows();
+  if (need > 0) sh.insertRowsAfter(sh.getMaxRows(), need + 50);
+  const formats = headers.map(function (k) { return types[k] ? numberFormat_(types[k]) : 'General'; });
+  const range = sh.getRange(start, 1, objs.length, headers.length);
+  range.setNumberFormats(objs.map(function () { return formats; }));
+  range.setValues(objs.map(function (o) { return headers.map(function (k) { return toCell_(o[k], types[k]); }); }));
+}
+
+function importBatch_(user, data) {
+  needRole_(user, ['Admin']);
+  if (!data || data.format !== 'account-master-import' || !data.tag) throw err_('This is not an Account Master import file');
+  const tag = String(data.tag).replace(/[^\w.-]/g, '').slice(0, 40);
+  const mark = tagOf_(tag);
+  const settings = readSettings_();
+  if (settings.imports.some(function (i) { return i.tag === tag && !i.undone; })) throw err_('This file was already imported. Undo it first to import again.');
+
+  // Dropdown lists the imported rows use
+  const lists = {};
+  Object.keys(data.lists || {}).forEach(function (k) {
+    if (!(k in DEFAULT_SETTINGS.lists)) return;
+    const cur = settings.lists[k].slice();
+    (data.lists[k] || []).forEach(function (v) { if (cur.indexOf(v) < 0) cur.push(v); });
+    lists[k] = cur;
+  });
+  if (Object.keys(lists).length) writeSettings_(user, Object.keys(lists).map(function (k) { return ['list.' + k, lists[k]]; }));
+
+  // Employees: update existing ones (matched by name), create the rest (tagged)
+  const known = {};
+  readTable_('Employees').forEach(function (e) { known[String(e.name).trim().toLowerCase()] = true; });
+  importEmployees_(user, (data.employees || []).map(function (e) {
+    const o = Object.assign({}, e);
+    if (known[String(o.name || '').trim().toLowerCase()]) delete o.notes;
+    else o.notes = (o.notes ? o.notes + ' ' : '') + mark;
+    return o;
+  }), '');
+  const empId = {};
+  readTable_('Employees').forEach(function (e) { empId[String(e.name).trim().toLowerCase()] = e.id; });
+
+  // Clients: match by name, otherwise create (tagged)
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  const counts = {};
+  try {
+    const now = new Date().toISOString();
+    const meta = { createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now };
+    const clients = readTable_('Clients');
+    const cliId = {};
+    clients.forEach(function (c) { cliId[String(c.name).trim().toLowerCase()] = c.id; });
+    const csh = sheet_('Clients');
+    const cvals = csh.getDataRange().getValues();
+    const chead = cvals[0].map(String);
+    const newClients = [];
+    (data.clients || []).forEach(function (c) {
+      const key = String(c.name || '').trim().toLowerCase();
+      if (!key || cliId[key]) return;
+      const o = Object.assign(sanitize_('Clients', c), meta);
+      o.id = newId_('CL');
+      o.clientCode = nextCode_(cvals, chead, 'clientCode', 'UL-C-');
+      cvals.push(chead.map(function (h) { return o[h] || ''; }));
+      o.notes = (o.notes ? o.notes + ' ' : '') + mark;
+      if (!o.status) o.status = 'Ongoing';
+      cliId[key] = o.id;
+      newClients.push(o);
+    });
+    appendRows_('Clients', newClients);
+    counts.Clients = newClients.length;
+
+    IMPORT_TABLES.forEach(function (table) {
+      const existingPays = table === 'SalaryPayments' ? readTable_('SalaryPayments') : [];
+      const out = [];
+      (data[table] || []).forEach(function (r) {
+        const rec = Object.assign({}, r);
+        if ('client' in rec) { rec.clientId = cliId[String(rec.client).trim().toLowerCase()] || ''; delete rec.client; }
+        if ('employee' in rec) { rec.employeeId = empId[String(rec.employee).trim().toLowerCase()] || ''; delete rec.employee; }
+        const o = Object.assign(sanitize_(table, rec), meta);
+        (SCHEMA[table].required || []).forEach(function (k) {
+          if (o[k] === '' || o[k] === undefined) throw err_(table + ': missing ' + k + ' in ' + JSON.stringify(r).slice(0, 120));
+        });
+        if (table === 'SalaryPayments' && existingPays.some(function (p) { return p.employeeId === o.employeeId && p.salaryMonth === o.salaryMonth; })) return;
+        o.id = newId_(SCHEMA[table].prefix);
+        o.notes = (o.notes ? o.notes + ' ' : '') + mark;
+        out.push(o);
+      });
+      appendRows_(table, out);
+      counts[table] = out.length;
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  counts.Employees = readTable_('Employees').filter(function (e) { return String(e.notes).indexOf(mark) >= 0; }).length;
+
+  const imports = readSettings_().imports.filter(function (i) { return i.tag !== tag; });
+  imports.unshift({ tag: tag, source: String(data.source || '').slice(0, 200), at: new Date().toISOString(), by: user.email, counts: counts });
+  writeSettings_(user, [['imports', imports.slice(0, 20)]]);
+  audit_(user, 'import', 'All', tag, JSON.stringify(counts));
+  return { counts: counts };
+}
+
+function undoImport_(user, tag) {
+  needRole_(user, ['Admin']);
+  const mark = tagOf_(String(tag || ''));
+  const counts = {};
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    IMPORT_TABLES.concat(['Clients', 'Employees']).forEach(function (table) {
+      const sh = sheet_(table);
+      const values = sh.getDataRange().getValues();
+      const n = values[0].map(String).indexOf('notes');
+      let removed = 0;
+      for (let i = values.length - 1; i >= 1; i--) {
+        if (String(values[i][n]).indexOf(mark) >= 0) {
+          if (table === 'Clients' || table === 'Employees') {
+            const id = values[i][values[0].map(String).indexOf('id')];
+            const linked = (CHILDREN[table] || []).some(function (c) {
+              return readTable_(c[0]).some(function (r) { return r[c[1]] === id; });
+            });
+            if (linked) continue;
+          }
+          sh.deleteRow(i + 1);
+          removed++;
+        }
+      }
+      counts[table] = removed;
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  const imports = readSettings_().imports.map(function (i) {
+    if (i.tag === tag) { i.undone = new Date().toISOString(); i.undoneBy = user.email; }
+    return i;
+  });
+  writeSettings_(user, [['imports', imports]]);
+  audit_(user, 'undo import', 'All', tag, JSON.stringify(counts));
+  return { counts: counts };
 }
 
 // Create/update employees from rows of a linked sheet tab. Matches by email,

@@ -882,7 +882,7 @@
     rows('EmployeeExpenses').forEach((r) => feed.push([r, 'Emp. expense', empName(r.employeeId) + ' · ' + r.expenseType, r.amount, 'neg']));
     rows('SalaryAdvances').forEach((r) => feed.push([r, 'Advance', empName(r.employeeId), r.amount, 'neg']));
     rows('SalaryPayments').forEach((r) => feed.push([r, 'Salary', empName(r.employeeId) + ' · ' + fmtMonth(r.salaryMonth), r.paidAmount, 'neg']));
-    feed.sort((a, b) => String(b[0].createdAt).localeCompare(String(a[0].createdAt)));
+    feed.sort((a, b) => String(b[0].date || b[0].paidDate).localeCompare(String(a[0].date || a[0].paidDate)) || String(b[0].createdAt).localeCompare(String(a[0].createdAt)));
     h += '<div class="card"><div class="card-head"><h2>Recent entries</h2></div><div class="card-body">' +
       (feed.length ? '<div style="display:flex;flex-direction:column">' + feed.slice(0, 8).map((f) =>
         '<div style="display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--border)"><div style="min-width:0"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span class="badge">' + esc(f[1]) + '</span> ' + esc(f[2]) + '</div>' +
@@ -1321,7 +1321,10 @@
 
   function viewSheet() {
     const sh = S.sheet;
+    const hiddenTabs = (S.settings && S.settings.hiddenTabs) || [];
+    const isHidden = sh && hiddenTabs.includes(sh.name);
     let h = pageHead('Sheet data', 'All other tabs of the Google Sheet — view, add, edit and delete rows',
+      (isAdmin() && sh && sh.name ? '<button class="btn" data-act="sheet-hide">' + (isHidden ? 'Show to everyone' : 'Hide from non-admins') + '</button>' : '') +
       '<button class="btn" data-act="sheet-reload">' + icon('refresh') + 'Refresh</button>');
     if (!sh || (sh.loading && !sh.tabs)) {
       return h + '<div class="loading" style="min-height:200px"><div class="spinner"></div><div>Reading the sheet…</div></div>';
@@ -1334,13 +1337,14 @@
     if (!sh.tabs.length) return h + '<div class="card"><div class="empty">The sheet has no other tabs besides the app’s own tabs. Add a tab in Google Sheets and press Refresh.</div></div>';
 
     h += '<div class="tab-pills" role="tablist">' + sh.tabs.map((t) => '<button role="tab" title="' + esc(t) + '" data-act="sheet-tab" data-id="' + esc(t) + '" class="' + (t === sh.name ? 'active' : '') + '">' + esc(t) +
-      (isLinkedTab(t) ? ' · Employees' : '') + '</button>').join('') + '</div>' +
+      (isLinkedTab(t) ? ' · Employees' : '') + (hiddenTabs.includes(t) ? ' 🔒' : '') + '</button>').join('') + '</div>' +
       '<label class="field tab-pick">Sheet tab (' + sh.tabs.length + ')<select class="input" data-act-change="sheet-tab">' +
       sh.tabs.map((t) => '<option' + (t === sh.name ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select></label>';
     if (sh.loading) return h + '<div class="loading" style="min-height:200px"><div class="spinner"></div></div>';
     if (sh.error) h += '<div class="form-error" style="margin-bottom:12px">' + esc(sh.error) + '</div>';
 
     const t = parseTab(sh.rows);
+    if (isHidden) h += '<div class="notice" style="margin:0 0 12px">🔒 Hidden: only Admins can see this tab.</div>';
     if (isLinkedTab(sh.name)) {
       h += '<div class="notice" style="margin:0 0 12px">This tab is linked to <a href="#/salary"><b>Employees &amp; salary</b></a>. Rows you add or edit here are synced to the employee list automatically.</div>';
     }
@@ -1552,7 +1556,7 @@
     const st = ui('settings');
     const items = [['profile', 'My profile']];
     if (canWrite()) items.push(['lists', 'Dropdown lists']);
-    if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['activity', 'Activity log']);
+    if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['import', 'Import data'], ['activity', 'Activity log']);
     if (!items.some((i) => i[0] === st.tab)) st.tab = 'profile';
     let h = pageHead('Settings', '');
     h += tabs('settings', items, 'profile');
@@ -1589,6 +1593,18 @@
         '<label class="field">Company name<input class="input" name="name" value="' + esc(c.name) + '"></label>' +
         '<label class="field">Default bike rate per km (₹)<input class="input" name="perKmRate" type="number" step="any" value="' + esc(c.perKmRate) + '"><span class="field-hint">Used for employee travel unless the employee has their own rate</span></label>' +
         '<div><button class="btn primary" type="submit">Save</button></div></form></div></div>';
+    } else if (st.tab === 'import') {
+      const imps = S.settings.imports || [];
+      h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Import from a file</h2></div><div class="card-body">' +
+        '<p class="muted" style="margin-top:0">Choose an Account Master import file (<code>.json</code>). You will see what it contains before anything is saved. Every imported row is tagged, so the whole import can be undone.</p>' +
+        '<input class="input" type="file" accept=".json,application/json" id="import-file" style="height:auto;padding:8px">' +
+        '<div id="import-preview" style="margin-top:14px"></div></div></div>' +
+        '<div class="card"><div class="card-head"><h2>Past imports</h2></div><div class="card-body">' +
+        (imps.length ? imps.map((i) => '<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><b>' + esc(i.tag) + '</b>' +
+          (i.undone ? '<span class="badge">Undone</span>' : '<button class="btn sm danger" data-act="import-undo" data-id="' + esc(i.tag) + '">Undo</button>') + '</div>' +
+          '<div class="small muted">' + esc(fmtStamp(i.at)) + ' by ' + esc(userName(i.by)) + (i.source ? ' · ' + esc(i.source) : '') + '</div>' +
+          '<div class="small">' + Object.keys(i.counts || {}).filter((k) => i.counts[k]).map((k) => esc(k) + ' ' + i.counts[k]).join(' · ') + '</div></div>').join('')
+          : '<div class="empty">No imports yet</div>') + '</div></div></div>';
     } else if (st.tab === 'activity') {
       h += '<div class="card" id="activity"><div class="loading" style="min-height:160px"><div class="spinner"></div></div></div>';
     }
@@ -1617,6 +1633,32 @@
           S.settings = r.settings;
           toast('Company settings saved');
         } catch (ex) { toast(ex.message, true); }
+      });
+    }
+    if (st.tab === 'import') {
+      $('#import-file').addEventListener('change', (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+          let d;
+          try { d = JSON.parse(rd.result); } catch (err) { $('#import-preview').innerHTML = '<div class="form-error">This file is not valid JSON.</div>'; return; }
+          if (!d || d.format !== 'account-master-import') { $('#import-preview').innerHTML = '<div class="form-error">This is not an Account Master import file.</div>'; return; }
+          S.pendingImport = d;
+          const rows = [
+            ['Employees (added or updated)', (d.employees || []).length, ''],
+            ['Clients', (d.clients || []).length, sum(d.clients || [], 'approvedAmount') ? 'Approved ' + inr(sum(d.clients || [], 'approvedAmount')) : ''],
+            ['Client payments', (d.ClientPayments || []).length, inr(sum(d.ClientPayments || [], 'amount'))],
+            ['Site labour / material', (d.ClientWork || []).length, inr(sum(d.ClientWork || [], 'amount'))],
+            ['Office expenses', (d.OfficeExpenses || []).length, inr(sum(d.OfficeExpenses || [], 'amount'))],
+            ['Salary advances', (d.SalaryAdvances || []).length, inr(sum(d.SalaryAdvances || [], 'amount'))],
+            ['Salary payments', (d.SalaryPayments || []).length, inr(sum(d.SalaryPayments || [], 'paidAmount'))],
+          ];
+          $('#import-preview').innerHTML = '<div class="small muted">' + esc(d.source || '') + '</div><div class="breakdown" style="margin:10px 0 14px">' +
+            rows.map((r) => '<span>' + esc(r[0]) + ' <span class="muted">(' + r[1] + ')</span></span><span class="num">' + r[2] + '</span>').join('') + '</div>' +
+            '<button class="btn primary" data-act="import-run">Import ' + esc(d.tag) + '</button>';
+        };
+        rd.readAsText(f);
       });
     }
     if (st.tab === 'activity') {
@@ -1731,6 +1773,31 @@
       case 'sheet-edit': openSheetRow(Number(el.dataset.id)); break;
       case 'sheet-del': deleteSheetRow(Number(el.dataset.id)); break;
       case 'sheet-addcol': openAddColumn(); break;
+      case 'sheet-hide': {
+        const name = S.sheet.name;
+        const cur = S.settings.hiddenTabs || [];
+        const next = cur.includes(name) ? cur.filter((t) => t !== name) : cur.concat([name]);
+        try { const r = await api('setHiddenTabs', { tabs: next }); S.settings = r.settings; toast(next.includes(name) ? 'Tab hidden from Accountants and Viewers' : 'Tab visible to everyone'); renderPage(); } catch (err) { toast(err.message, true); }
+        break;
+      }
+      case 'import-run': {
+        if (!S.pendingImport || !confirm('Import ' + S.pendingImport.tag + ' into the Google Sheet?')) break;
+        el.disabled = true; el.textContent = 'Importing… (can take a minute)';
+        try {
+          const r = await api('importBatch', { data: S.pendingImport });
+          S.pendingImport = null;
+          await loadAll();
+          toast('Imported: ' + Object.keys(r.counts).filter((k) => r.counts[k]).map((k) => k + ' ' + r.counts[k]).join(', '));
+          renderPage();
+        } catch (err) { toast(err.message, true); el.disabled = false; el.textContent = 'Import'; }
+        break;
+      }
+      case 'import-undo': {
+        if (!confirm('Undo import ' + el.dataset.id + '? All rows it added will be deleted from the sheet.')) break;
+        el.disabled = true;
+        try { const r = await api('undoImport', { tag: el.dataset.id }); await loadAll(); toast('Undone: ' + Object.keys(r.counts).filter((k) => r.counts[k]).map((k) => k + ' ' + r.counts[k]).join(', ')); renderPage(); } catch (err) { toast(err.message, true); el.disabled = false; }
+        break;
+      }
       case 'emp-link': openEmployeeLink(); break;
       case 'emp-unlink': unlinkEmployees(); break;
       case 'emp-sync':
@@ -1966,6 +2033,8 @@
           else if (req.row) t[req.row - 1] = req.values; else t.push(req.values);
           save(); return { ok: true };
         }
+        case 'setHiddenTabs': db.settings.hiddenTabs = req.tabs; save(); return { ok: true, settings: db.settings };
+        case 'importBatch': case 'undoImport': return fail('Import is not available in demo mode');
         case 'importEmployees': {
           if (!write) return fail('You do not have permission for this action');
           let created = 0; let updated = 0;
