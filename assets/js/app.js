@@ -67,6 +67,7 @@
   const clientName = (id) => { const c = byId('Clients', id); return c ? c.name : ''; };
   const empName = (id) => { const e = byId('Employees', id); return e ? e.name : ''; };
   const userName = (email) => { const u = S.users.find((x) => x.email === email); return u ? u.name : email || ''; };
+  const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
   const isKmType = (t) => /km/i.test(t || '');
   const inRange = (d, p) => (!p.from || d >= p.from) && (!p.to || d <= p.to);
 
@@ -838,7 +839,7 @@
       '<button class="btn" data-act="reload">' + icon('refresh') + 'Refresh</button>');
     h += '<div class="filters">' + periodControls('dashboard') + '</div>';
     h += '<div class="kpis">' +
-      kpi('Received from clients', inr(cf.received), rows('ClientPayments').filter((r) => inRange(r.date, p)).length + ' payments') +
+      kpi('Received from clients', inr(cf.received), plural(rows('ClientPayments').filter((r) => inRange(r.date, p)).length, 'payment')) +
       kpi('Total spent', inr(cf.out), 'Site work, office & salary') +
       kpi('Net cash flow', inr(cf.net), cf.net >= 0 ? 'More in than out' : 'More out than in', cf.net >= 0 ? 'good' : 'bad') +
       kpi('Client dues', inr(dues), clients.filter((x) => x.due > 0).length + ' clients still to pay', dues > 0 ? 'bad' : '') +
@@ -1014,7 +1015,7 @@
 
     h += '<div class="kpis">' +
       kpi('Approved estimate', inr(s.approved)) +
-      kpi('Received', inr(s.received), s.pays.length + ' payments', 'good') +
+      kpi('Received', inr(s.received), plural(s.pays.length, 'payment'), 'good') +
       kpi('Due from client', inr(s.due), s.approved ? Math.round(s.received / s.approved * 100) + '% collected' : 'Set approved amount', s.due > 0 ? 'bad' : '') +
       kpi('Site cost', inr(s.cost), 'Labour ' + inr(s.labour) + ' · Material ' + inr(s.material)) +
       kpi('Margin', inr(s.margin), s.approved ? Math.round(s.margin / s.approved * 100) + '% of approved' : '', s.margin >= 0 ? 'good' : 'bad') +
@@ -1294,7 +1295,7 @@
       ], S.users, {
         sort: { k: 'name', dir: 'asc' },
         actions: (u) => '<button class="btn ghost sm icon" title="Edit" data-act="member-edit" data-id="' + esc(u.id) + '">' + icon('edit') + '</button>' +
-          '<button class="btn ghost sm icon" title="Reset password" data-act="member-reset" data-id="' + esc(u.id) + '">' + icon('key') + '</button>',
+          (u.id === S.user.id ? '' : '<button class="btn ghost sm icon" title="Reset password" data-act="member-reset" data-id="' + esc(u.id) + '">' + icon('key') + '</button>'),
       }) + '</div>';
     } else if (st.tab === 'company') {
       const c = S.settings.company;

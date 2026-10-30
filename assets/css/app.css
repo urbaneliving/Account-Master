@@ -246,6 +246,7 @@ table.data td.actions { white-space: nowrap; text-align: right; width: 1%; }
 /* ---------- Detail header ---------- */
 .detail-head { padding: 18px; display: flex; gap: 16px; justify-content: space-between; flex-wrap: wrap; }
 .detail-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--text-2); margin-top: 6px; font-size: 13px; }
+.back svg { width: 16px; height: 16px; }
 .back { display: inline-flex; align-items: center; gap: 4px; color: var(--text-2); margin-bottom: 12px; font-weight: 500; }
 .breakdown { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; }
 .breakdown .total { border-top: 1px solid var(--border); padding-top: 8px; font-weight: 700; }

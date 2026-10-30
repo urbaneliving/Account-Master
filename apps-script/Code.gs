@@ -378,7 +378,7 @@ function sanitize_(table, rec) {
   const types = types_(table);
   const out = {};
   Object.keys(types).forEach(function (k) {
-    if (META_FIELDS.indexOf(k) >= 0) return;
+    if (META_FIELDS.split(' ').indexOf(k) >= 0) return;
     if (!(k in rec)) return;
     let v = rec[k];
     if (types[k] === 'number') {
@@ -564,7 +564,7 @@ function normalize_(v, type) {
   if (v instanceof Date) {
     return Utilities.formatDate(v, Session.getScriptTimeZone(), type === 'month' ? 'yyyy-MM' : 'yyyy-MM-dd');
   }
-  if (type === 'number') return v === '' || v === null ? 0 : Number(v) || 0;
+  if (type === 'number') return v === '' || v === null ? '' : Number(v) || 0;
   return v === null || v === undefined ? '' : String(v);
 }
 
