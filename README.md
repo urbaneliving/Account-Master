@@ -9,6 +9,9 @@ Accounts dashboard for Urbane Living. The accountant does all the work from this
 - **Login & members:** Admin, Accountant and Viewer roles. Admins add members from Settings.
 - **Sheet data:** shows every other tab of the Google Sheet. Accountants can add, edit and delete rows, and add columns, without opening the sheet.
 - **Employees from a sheet tab:** in Employees & salary → Employees, choose "Link sheet tab" and pick which column is the name, mobile, salary and so on. Rows in that tab become employees and stay in sync.
+- **Estimates:** the same estimate document as the old estimate page (sections, specs, terms, bank details, PDF). Version 1 is the original and every update is saved as a new version with an edit log. Approved estimates become clients in one click. Admins can import the old Firebase estimates.
+- **Attendance:** marked automatically when someone opens the dashboard from the office network (allowed IP prefixes in Settings → Attendance), with an optional office-location fallback. Team view with a monthly grid for Admins and Accountants.
+- **Roles:** Admin (CEO, COO, VP Sales, IT Manager) sees and handles everything. Accountant handles the accounts. Staff see only their own estimates and attendance.
 - **Dashboard:** cash in vs cash out, client dues, pending salary, recent entries.
 - Fully responsive (phone, tablet, desktop), dark mode, CSV export and print.
 

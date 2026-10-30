@@ -7,12 +7,15 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-10-31.2';
+const API_VERSION = '2026-11-01.1';
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
 const SESSION_DAYS = 7;
 const MAX_LOGIN_FAILS = 5;
-const ROLES = ['Admin', 'Accountant', 'Viewer'];
+const ROLES = ['Admin', 'Accountant', 'Viewer', 'Staff'];
 const WRITE_ROLES = ['Admin', 'Accountant'];
+// Roles that see the accounts (clients' money, office, salary). Staff only see their own work.
+const ACCOUNTS_ROLES = ['Admin', 'Accountant', 'Viewer'];
+const TZ = 'Asia/Kolkata';
 
 // First members created by setup(). Each gets a one-time password printed in
 // the execution log and must change it on first login.
@@ -79,6 +82,12 @@ const SCHEMA = {
     refs: { employeeId: 'Employees' },
     unique: ['salaryMonth', 'employeeId'],
   },
+  Estimates: {
+    fields: 'id estimateNo version:number isOriginal estimateDate:date clientName clientPhone clientAddress grandTotal:number status clientId data logs ' + META_FIELDS,
+  },
+  Attendance: {
+    fields: 'id date:date email name checkIn checkOut ip method status notes ' + META_FIELDS,
+  },
   Settings: { fields: 'key value updatedBy updatedAt' },
   AuditLog: { fields: 'timestamp user action table recordId details' },
 };
@@ -90,7 +99,15 @@ const CHILDREN = {
 };
 
 const DEFAULT_SETTINGS = {
-  company: { name: 'Urbane Living', perKmRate: 3 },
+  company: {
+    name: 'Urbane Living', perKmRate: 3, website: 'urbaneliving.in', gstNo: '09AAJFU0647A1ZC',
+    address: 'G-12, Express Green Plaza, Sector-1, Vaishali, Ghaziabad', serviceArea: 'Gurugram, Noida, Delhi, Ghaziabad',
+    logoUrl: 'https://res.cloudinary.com/diosq0s7w/image/upload/q_auto/f_auto/v1779706583/Urbane-Living-05-25-2026_04_25_PM_blepmc.png',
+    bankName: '', bankAccount: '', bankIfsc: '', estimatePrefix: 'RFIUL', estimateValidDays: 14,
+  },
+  attendance: { ipPrefixes: ['2406:b400:71:93ee'], startTime: '10:00', autoMark: true, geo: { enabled: false, lat: '', lng: '', radius: 200 } },
+  estimateCounter: 226,
+  estimateTemplate: null,
   employeeSource: null,
   imports: [],
   hiddenTabs: [],
@@ -149,7 +166,7 @@ function route_(req) {
     case 'resetPassword': return resetPassword_(user, req.id, req.password);
     case 'saveSettings': return saveSettings_(user, req.settings);
     case 'audit': return { rows: auditRows_(user, req.limit) };
-    case 'sheetTabs': return sheetTabs_(req.name, user.role === 'Admin');
+    case 'sheetTabs': needRole_(user, ACCOUNTS_ROLES); return sheetTabs_(req.name, user.role === 'Admin');
     case 'sheetRowSave': return sheetRowSave_(user, req.name, req.row, req.values, req.original);
     case 'sheetRowDelete': return sheetRowDelete_(user, req.name, req.row, req.original);
     case 'sheetAddColumn': return sheetAddColumn_(user, req.name, req.headerRow, req.label);
@@ -157,6 +174,15 @@ function route_(req) {
     case 'importBatch': return importBatch_(user, req.data);
     case 'undoImport': return undoImport_(user, req.tag);
     case 'setHiddenTabs': return setHiddenTabs_(user, req.tabs);
+    case 'estimateGet': return { record: estimateGet_(user, req.id) };
+    case 'estimateSave': return estimateSave_(user, req.record, req.mode);
+    case 'estimateDelete': return estimateDelete_(user, req.id);
+    case 'estimateStatus': return estimateStatus_(user, req.estimateNo, req.status);
+    case 'estimateToClient': return estimateToClient_(user, req.estimateNo);
+    case 'estimateImport': return estimateImport_(user, req.records);
+    case 'attendanceMark': return attendanceMark_(user, req);
+    case 'attendanceList': return { rows: attendanceList_(user, req.from, req.to) };
+    case 'attendanceSave': return attendanceSave_(user, req.record);
     default: throw err_('Unknown action: ' + req.action);
   }
 }
@@ -275,14 +301,19 @@ function changePassword_(user, oldPassword, newPassword) {
 // ---------------------------------------------------------------------------
 function bootstrap_(user) {
   const data = {};
+  const accounts = ACCOUNTS_ROLES.indexOf(user.role) >= 0;
   Object.keys(SCHEMA).forEach(function (t) {
-    if (SCHEMA[t].editable) data[t] = readTable_(t);
+    if (SCHEMA[t].editable && accounts) data[t] = readTable_(t);
   });
   const users = readTable_('Users');
+  const settings = readSettings_();
+  if (!accounts) settings.lists = {};
   return {
     user: publicUser_(user),
-    settings: readSettings_(),
+    settings: settings,
     data: data,
+    estimates: estimatesList_(user),
+    attendanceToday: attendanceToday_(user),
     users: users.map(function (u) {
       const p = publicUser_(u);
       if (user.role !== 'Admin') return { id: p.id, name: p.name, email: p.email, designation: p.designation, role: p.role, status: p.status };
@@ -478,6 +509,9 @@ function readSettings_() {
       const v = JSON.parse(r.value);
       if (r.key === 'company') s.company = Object.assign(s.company, v);
       else if (r.key === 'employeeSource') s.employeeSource = v;
+      else if (r.key === 'attendance') s.attendance = Object.assign(s.attendance, v);
+      else if (r.key === 'estimateCounter') s.estimateCounter = Number(v) || s.estimateCounter;
+      else if (r.key === 'estimateTemplate') s.estimateTemplate = v;
       else if ((r.key === 'imports' || r.key === 'hiddenTabs') && Array.isArray(v)) s[r.key] = v;
       else if (r.key.indexOf('list.') === 0 && Array.isArray(v)) s.lists[r.key.slice(5)] = v;
     } catch (e) { /* ignore malformed values */ }
@@ -492,7 +526,33 @@ function saveSettings_(user, settings) {
   if (settings.company) {
     if (user.role !== 'Admin') throw err_('Only Admin can change company settings', 'FORBIDDEN');
     const c = settings.company;
-    entries.push(['company', { name: String(c.name || '').trim() || 'Urbane Living', perKmRate: Number(c.perKmRate) || 0 }]);
+    const str = function (k, max) { return String(c[k] === undefined ? '' : c[k]).trim().slice(0, max || 300); };
+    entries.push(['company', {
+      name: str('name') || 'Urbane Living', perKmRate: Number(c.perKmRate) || 0, website: str('website'), gstNo: str('gstNo'),
+      address: str('address'), serviceArea: str('serviceArea'), logoUrl: str('logoUrl', 500), bankName: str('bankName'),
+      bankAccount: str('bankAccount'), bankIfsc: str('bankIfsc'), estimatePrefix: str('estimatePrefix', 12) || 'RFIUL',
+      estimateValidDays: Number(c.estimateValidDays) || 14,
+    }]);
+  }
+  if (settings.attendance) {
+    if (user.role !== 'Admin') throw err_('Only Admin can change attendance settings', 'FORBIDDEN');
+    const a = settings.attendance;
+    entries.push(['attendance', {
+      ipPrefixes: (a.ipPrefixes || []).map(function (x) { return String(x).trim().toLowerCase(); }).filter(String).slice(0, 20),
+      startTime: /^\d{2}:\d{2}$/.test(a.startTime) ? a.startTime : '10:00',
+      autoMark: a.autoMark !== false,
+      geo: { enabled: !!(a.geo && a.geo.enabled), lat: Number(a.geo && a.geo.lat) || '', lng: Number(a.geo && a.geo.lng) || '', radius: Number(a.geo && a.geo.radius) || 200 },
+    }]);
+  }
+  if ('estimateCounter' in settings) {
+    if (user.role !== 'Admin') throw err_('Only Admin can change the estimate counter', 'FORBIDDEN');
+    entries.push(['estimateCounter', Math.max(0, Math.floor(Number(settings.estimateCounter) || 0))]);
+  }
+  if ('estimateTemplate' in settings) {
+    if (user.role !== 'Admin') throw err_('Only Admin can change the estimate template', 'FORBIDDEN');
+    const tpl = settings.estimateTemplate;
+    if (tpl && JSON.stringify(tpl).length > 45000) throw err_('Template is too large');
+    entries.push(['estimateTemplate', tpl || null]);
   }
   if ('employeeSource' in settings) entries.push(['employeeSource', cleanSource_(settings.employeeSource, null)]);
   Object.keys(settings.lists || {}).forEach(function (k) {
@@ -635,6 +695,302 @@ function setHiddenTabs_(user, tabs) {
   writeSettings_(user, [['hiddenTabs', tabs]]);
   audit_(user, 'update', 'Settings', '', 'Hidden tabs: ' + (tabs.join(', ') || 'none'));
   return { settings: readSettings_() };
+}
+
+// ---------------------------------------------------------------------------
+// Estimates. Each save is a row: version 1 is the original, later versions are
+// updates (history is kept). Sections/specs/terms are stored as JSON in "data".
+// ---------------------------------------------------------------------------
+function canSeeAllEstimates_(user) { return ACCOUNTS_ROLES.indexOf(user.role) >= 0; }
+
+function estimateOwner_(rows, estimateNo) {
+  const orig = rows.filter(function (r) { return r.estimateNo === estimateNo; })
+    .sort(function (a, b) { return Number(a.version) - Number(b.version); })[0];
+  return orig ? String(orig.createdBy).toLowerCase() : '';
+}
+
+function canEditEstimate_(user, rows, estimateNo) {
+  return user.role === 'Admin' || estimateOwner_(rows, estimateNo) === String(user.email).toLowerCase();
+}
+
+function estimatesList_(user) {
+  const rows = readTable_('Estimates');
+  const me = String(user.email).toLowerCase();
+  const mine = {};
+  rows.forEach(function (r) { if (estimateOwner_(rows, r.estimateNo) === me) mine[r.estimateNo] = true; });
+  return rows.filter(function (r) { return canSeeAllEstimates_(user) || mine[r.estimateNo]; }).map(function (r) {
+    const o = Object.assign({}, r);
+    delete o.data;
+    delete o.logs;
+    o.isOriginal = isTrue_(r.isOriginal);
+    o.version = Number(r.version) || 1;
+    return o;
+  });
+}
+
+function estimateGet_(user, id) {
+  const rows = readTable_('Estimates');
+  const r = rows.filter(function (x) { return x.id === id; })[0];
+  if (!r) throw err_('Estimate not found');
+  if (!canSeeAllEstimates_(user) && estimateOwner_(rows, r.estimateNo) !== String(user.email).toLowerCase()) throw err_('You can only open your own estimates', 'FORBIDDEN');
+  const o = Object.assign({}, r);
+  try { o.data = JSON.parse(r.data || '{}'); } catch (e) { o.data = {}; }
+  try { o.logs = JSON.parse(r.logs || '[]'); } catch (e) { o.logs = []; }
+  o.isOriginal = isTrue_(r.isOriginal);
+  o.version = Number(r.version) || 1;
+  return o;
+}
+
+function estimateTotal_(sections) {
+  return (sections || []).reduce(function (a, s) {
+    return a + (s.items || []).reduce(function (b, i) { return b + (parseFloat(i.amount) || 0); }, 0);
+  }, 0);
+}
+
+function cleanEstimateData_(d) {
+  d = d || {};
+  const txt = function (v, max) { return String(v === null || v === undefined ? '' : v).slice(0, max || 5000); };
+  return {
+    sections: (d.sections || []).slice(0, 60).map(function (s) {
+      return { title: txt(s.title, 300), items: (s.items || []).slice(0, 60).map(function (i) {
+        return { name: txt(i.name), area: txt(i.area, 40), unit: txt(i.unit, 20), amount: txt(i.amount, 20) };
+      }) };
+    }),
+    specs: (d.specs || []).slice(0, 60).map(function (x) { return { cat: txt(x.cat, 200), detail: txt(x.detail, 2000) }; }),
+    terms: (d.terms || []).slice(0, 60).map(function (x) { return { label: txt(x.label, 4), text: txt(x.text, 2000) }; }),
+  };
+}
+
+function estimateSave_(user, rec, mode) {
+  rec = rec || {};
+  const client = rec.client || {};
+  const clientName = String(client.name || '').trim();
+  if (!clientName) throw err_('Client name is required');
+  const data = cleanEstimateData_(rec.data);
+  const dataJson = JSON.stringify(data);
+  if (dataJson.length > 45000) throw err_('This estimate is too long to save (over 45,000 characters). Shorten some descriptions.');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const rows = readTable_('Estimates');
+    const settings = readSettings_();
+    const now = new Date();
+    const stamp = now.toISOString();
+    const by = user.email;
+    let o;
+    const newLogs = (rec.newLogs || []).slice(0, 50).map(function (l) { return { time: stamp, user: by, action: String(l).slice(0, 200) }; });
+    if (mode === 'new') {
+      const counter = (Number(settings.estimateCounter) || 0) + 1;
+      writeSettings_(user, [['estimateCounter', counter]]);
+      const estimateNo = (settings.company.estimatePrefix || 'RFIUL') + Utilities.formatDate(now, TZ, 'MMdd') + counter;
+      o = { id: newId_('ES'), estimateNo: estimateNo, version: 1, isOriginal: 'TRUE', status: 'Draft', clientId: '' };
+      newLogs.unshift({ time: stamp, user: by, action: 'Saved original estimate ' + estimateNo });
+      o.logs = JSON.stringify(newLogs);
+    } else {
+      const no = String(rec.estimateNo || '');
+      const versions = rows.filter(function (r) { return r.estimateNo === no; });
+      if (!versions.length) throw err_('Estimate ' + no + ' not found');
+      if (!canEditEstimate_(user, rows, no)) throw err_('Only the person who created this estimate, or an Admin, can update it', 'FORBIDDEN');
+      const latest = versions.sort(function (a, b) { return Number(b.version) - Number(a.version); })[0];
+      let prevLogs = [];
+      try { prevLogs = JSON.parse(latest.logs || '[]'); } catch (e) { /* ignore */ }
+      const version = Number(latest.version) + 1;
+      newLogs.unshift({ time: stamp, user: by, action: 'Updated to V' + version });
+      o = { id: newId_('ES'), estimateNo: no, version: version, isOriginal: 'FALSE', status: latest.status || 'Draft', clientId: latest.clientId || '' };
+      o.logs = JSON.stringify(newLogs.concat(prevLogs).slice(0, 300));
+    }
+    Object.assign(o, {
+      estimateDate: /^\d{4}-\d{2}-\d{2}$/.test(rec.estimateDate || '') ? rec.estimateDate : Utilities.formatDate(now, TZ, 'yyyy-MM-dd'),
+      clientName: clientName.slice(0, 200), clientPhone: String(client.phone || '').trim().slice(0, 40), clientAddress: String(client.address || '').trim().slice(0, 500),
+      grandTotal: estimateTotal_(data.sections), data: dataJson,
+      createdBy: by, createdAt: stamp, updatedBy: by, updatedAt: stamp,
+    });
+    if (mode !== 'new') {
+      const orig = rows.filter(function (r) { return r.estimateNo === o.estimateNo; }).sort(function (a, b) { return Number(a.version) - Number(b.version); })[0];
+      o.createdBy = orig.createdBy;
+    }
+    appendObj_('Estimates', o);
+    audit_(user, mode === 'new' ? 'create' : 'update', 'Estimates', o.estimateNo, 'V' + o.version + ' ' + o.clientName + ' ' + o.grandTotal);
+    return { record: estimateGet_(user, o.id), estimates: estimatesList_(user) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function estimateDelete_(user, id) {
+  const rows = readTable_('Estimates');
+  const r = rows.filter(function (x) { return x.id === id; })[0];
+  if (!r) throw err_('Estimate not found');
+  if (!canEditEstimate_(user, rows, r.estimateNo)) throw err_('Only the person who created this estimate, or an Admin, can delete it', 'FORBIDDEN');
+  const sh = sheet_('Estimates');
+  const values = sh.getDataRange().getValues();
+  const idCol = values[0].map(String).indexOf('id');
+  for (let i = values.length - 1; i >= 1; i--) {
+    if (String(values[i][idCol]) === id) { sh.deleteRow(i + 1); break; }
+  }
+  audit_(user, 'delete', 'Estimates', r.estimateNo, 'V' + r.version + ' ' + r.clientName);
+  return { estimates: estimatesList_(user) };
+}
+
+function setEstimateFields_(estimateNo, patch) {
+  readTable_('Estimates').filter(function (r) { return r.estimateNo === estimateNo; }).forEach(function (r) { patchRow_('Estimates', r.id, patch); });
+}
+
+function estimateStatus_(user, estimateNo, status) {
+  if (['Draft', 'Sent', 'Approved', 'Rejected'].indexOf(status) < 0) throw err_('Invalid status');
+  const rows = readTable_('Estimates');
+  if (!canEditEstimate_(user, rows, estimateNo) && WRITE_ROLES.indexOf(user.role) < 0) throw err_('You cannot change this estimate', 'FORBIDDEN');
+  setEstimateFields_(estimateNo, { status: status, updatedBy: user.email, updatedAt: new Date().toISOString() });
+  audit_(user, 'update', 'Estimates', estimateNo, 'Status ' + status);
+  return { estimates: estimatesList_(user) };
+}
+
+function estimateToClient_(user, estimateNo) {
+  needRole_(user, WRITE_ROLES);
+  const versions = readTable_('Estimates').filter(function (r) { return r.estimateNo === estimateNo; })
+    .sort(function (a, b) { return Number(b.version) - Number(a.version); });
+  if (!versions.length) throw err_('Estimate not found');
+  const latest = versions[0];
+  if (latest.clientId && readTable_('Clients').some(function (c) { return c.id === latest.clientId; })) throw err_('This estimate is already linked to a client');
+  const saved = saveRecord_(user, 'Clients', {
+    name: latest.clientName, phone: latest.clientPhone, siteAddress: latest.clientAddress, estimateRef: estimateNo,
+    approvedAmount: Number(latest.grandTotal) || '', startDate: Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd'), status: 'Ongoing',
+    notes: 'Created from estimate ' + estimateNo + ' V' + latest.version,
+  }).record;
+  setEstimateFields_(estimateNo, { clientId: saved.id, status: 'Approved', updatedBy: user.email, updatedAt: new Date().toISOString() });
+  return { client: saved, estimates: estimatesList_(user) };
+}
+
+// One-time copy of estimates from the old Firebase estimate page.
+function estimateImport_(user, records) {
+  needRole_(user, ['Admin']);
+  const rows = readTable_('Estimates');
+  const have = {};
+  rows.forEach(function (r) { have[r.estimateNo + '#' + r.version] = true; });
+  const settings = readSettings_();
+  let maxCounter = Number(settings.estimateCounter) || 0;
+  const out = [];
+  (records || []).forEach(function (r) {
+    const no = String(r.estimateNo || '').trim();
+    const version = Math.max(1, Number(r.version) || 1);
+    if (!no || have[no + '#' + version]) return;
+    have[no + '#' + version] = true;
+    const data = cleanEstimateData_(r);
+    const dm = String(r.estimateDate || '').match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    const m = no.match(/(\d+)$/);
+    if (m && m[1].length > 4) maxCounter = Math.max(maxCounter, Number(m[1].slice(4)) || 0);
+    out.push({
+      id: newId_('ES'), estimateNo: no, version: version, isOriginal: version === 1 ? 'TRUE' : 'FALSE',
+      estimateDate: dm ? dm[3] + '-' + dm[2] + '-' + dm[1] : '', clientName: String((r.client || {}).name || 'Unnamed').slice(0, 200),
+      clientPhone: '', clientAddress: String((r.client || {}).address || '').slice(0, 500), grandTotal: estimateTotal_(data.sections),
+      status: 'Sent', clientId: '', data: JSON.stringify(data),
+      logs: JSON.stringify((r.editLogs || []).slice(0, 200).map(function (l) { return { time: l.date || l.time || '', user: l.user_id || '', action: String(l.action || '').slice(0, 200) }; })),
+      createdBy: String(r.createdBy || user.email), createdAt: String(r.updatedAt || new Date().toISOString()),
+      updatedBy: String(r.updatedBy || r.createdBy || user.email), updatedAt: String(r.updatedAt || new Date().toISOString()),
+    });
+  });
+  appendRows_('Estimates', out);
+  if (maxCounter > (Number(settings.estimateCounter) || 0)) writeSettings_(user, [['estimateCounter', maxCounter]]);
+  audit_(user, 'import', 'Estimates', '', out.length + ' estimates from the old estimate page');
+  return { imported: out.length, estimates: estimatesList_(user) };
+}
+
+// ---------------------------------------------------------------------------
+// Attendance — marked only from the office network (IP prefix) or, if
+// enabled, from within the office geofence. Times are India time.
+// ---------------------------------------------------------------------------
+function v6Groups_(ip) {
+  if (ip.indexOf(':') < 0) return null;
+  const parts = ip.split('::');
+  const head = parts[0] ? parts[0].split(':') : [];
+  const tail = parts.length > 1 && parts[1] ? parts[1].split(':') : [];
+  const fill = [];
+  if (parts.length > 1) for (let k = 0; k < 8 - head.length - tail.length; k++) fill.push('0');
+  return head.concat(fill, tail).map(function (g) { return (g.replace(/^0+/, '') || '0').toLowerCase(); });
+}
+
+function officeCheck_(settings, ip, lat, lng) {
+  const a = settings.attendance;
+  ip = String(ip || '').trim().toLowerCase();
+  const ipOk = !!ip && a.ipPrefixes.some(function (p) {
+    p = String(p).trim().toLowerCase().replace(/\/\d+$/, '').replace(/[:.]+$/, '');
+    if (!p) return false;
+    if (p.indexOf(':') >= 0) {
+      const ig = v6Groups_(ip);
+      const pg = p.split(':').map(function (g) { return g.replace(/^0+/, '') || '0'; });
+      return !!ig && pg.every(function (g, k) { return ig[k] === g; });
+    }
+    return ip === p || ip.indexOf(p + '.') === 0;
+  });
+  let geoOk = false;
+  if (a.geo.enabled && lat !== '' && lat !== undefined && lng !== '' && lng !== undefined && a.geo.lat !== '') {
+    const R = 6371000;
+    const toRad = function (d) { return d * Math.PI / 180; };
+    const dLat = toRad(Number(lat) - a.geo.lat);
+    const dLng = toRad(Number(lng) - a.geo.lng);
+    const h = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(toRad(a.geo.lat)) * Math.cos(toRad(Number(lat))) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    geoOk = 2 * R * Math.asin(Math.sqrt(h)) <= a.geo.radius;
+  }
+  return ipOk ? 'Office IP' : geoOk ? 'Office location' : '';
+}
+
+function attendanceToday_(user) {
+  const today = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
+  return readTable_('Attendance').filter(function (r) { return r.date === today && r.email.toLowerCase() === user.email.toLowerCase(); })[0] || null;
+}
+
+function attendanceMark_(user, req) {
+  const settings = readSettings_();
+  const method = officeCheck_(settings, req.ip, req.lat, req.lng);
+  if (!method) throw err_('Attendance can be marked only from the office network. Your IP: ' + (req.ip || 'unknown'), 'NOT_OFFICE');
+  const now = new Date();
+  const date = Utilities.formatDate(now, TZ, 'yyyy-MM-dd');
+  const time = Utilities.formatDate(now, TZ, 'HH:mm');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const row = readTable_('Attendance').filter(function (r) { return r.date === date && r.email.toLowerCase() === user.email.toLowerCase(); })[0];
+    if (!row) {
+      const o = {
+        id: newId_('AT'), date: date, email: user.email, name: user.name, checkIn: time, checkOut: '', ip: String(req.ip || '').slice(0, 60), method: method,
+        status: time > settings.attendance.startTime ? 'Late' : 'Present', notes: '',
+        createdBy: user.email, createdAt: now.toISOString(), updatedBy: user.email, updatedAt: now.toISOString(),
+      };
+      appendObj_('Attendance', o);
+      audit_(user, 'attendance', 'Attendance', o.id, 'Check-in ' + time + ' via ' + method);
+      return { record: o, action: 'in' };
+    }
+    if (req.kind === 'in') return { record: row, action: 'already' };
+    patchRow_('Attendance', row.id, { checkOut: time, updatedBy: user.email, updatedAt: now.toISOString() });
+    row.checkOut = time;
+    return { record: row, action: 'out' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function attendanceList_(user, from, to) {
+  const all = ['Admin', 'Accountant'].indexOf(user.role) >= 0;
+  return readTable_('Attendance').filter(function (r) {
+    return (all || r.email.toLowerCase() === user.email.toLowerCase()) && (!from || r.date >= from) && (!to || r.date <= to);
+  });
+}
+
+function attendanceSave_(user, rec) {
+  needRole_(user, ['Admin']);
+  rec = rec || {};
+  const statuses = ['Present', 'Late', 'Half Day', 'Leave', 'Absent', 'Holiday'];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(rec.date || '')) throw err_('Invalid date');
+  if (statuses.indexOf(rec.status) < 0) throw err_('Invalid status');
+  const target = readTable_('Users').filter(function (u) { return u.email.toLowerCase() === String(rec.email || '').toLowerCase(); })[0];
+  if (!target) throw err_('Member not found');
+  const t = function (v) { v = String(v || '').trim(); if (v && !/^\d{2}:\d{2}$/.test(v)) throw err_('Time must be HH:MM'); return v; };
+  const patch = { status: rec.status, checkIn: t(rec.checkIn), checkOut: t(rec.checkOut), notes: String(rec.notes || '').slice(0, 300), updatedBy: user.email, updatedAt: new Date().toISOString() };
+  const row = readTable_('Attendance').filter(function (r) { return r.date === rec.date && r.email.toLowerCase() === target.email.toLowerCase(); })[0];
+  if (row) patchRow_('Attendance', row.id, patch);
+  else appendObj_('Attendance', Object.assign({ id: newId_('AT'), date: rec.date, email: target.email, name: target.name, ip: '', method: 'Manual (Admin)', createdBy: user.email, createdAt: new Date().toISOString() }, patch));
+  audit_(user, 'attendance', 'Attendance', target.email, rec.date + ' ' + rec.status);
+  return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -884,7 +1240,16 @@ function ss_() {
 }
 
 function sheet_(name) {
-  const sh = ss_().getSheetByName(name);
+  const ss = ss_();
+  let sh = ss.getSheetByName(name);
+  if (!sh && SCHEMA[name]) {
+    // Tabs added in later versions are created on first use.
+    sh = ss.insertSheet(name);
+    const fields = fields_(name);
+    sh.getRange(1, 1, 1, fields.length).setValues([fields.map(function (f) { return f[0]; })])
+      .setFontWeight('bold').setBackground('#1e293b').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+  }
   if (!sh) throw err_('Sheet tab "' + name + '" is missing. Run setup() once from the Apps Script editor.');
   return sh;
 }

@@ -61,6 +61,8 @@
   const initials = (n) => String(n || '?').split(/\s+/).map((p) => p[0]).slice(0, 2).join('').toUpperCase();
   const canWrite = () => S.user && WRITE_ROLES.includes(S.user.role);
   const isAdmin = () => S.user && S.user.role === 'Admin';
+  const ACCOUNTS_ROLES = ['Admin', 'Accountant', 'Viewer'];
+  const seesAccounts = () => S.user && ACCOUNTS_ROLES.includes(S.user.role);
   const list = (k) => (S.settings && S.settings.lists[k]) || [];
   const rows = (t) => S.data[t] || [];
   const byId = (t, id) => rows(t).find((r) => r.id === id);
@@ -83,6 +85,8 @@
     salary: '<circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6s7 2 7 6"/><path d="M17 11h5M19.5 8.5v5"/>',
     expenses: '<path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/>',
+    estimate: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>',
+    attendance: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     sheet: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
@@ -405,6 +409,10 @@
     S.data = {};
     S.sheet = null;
     S.autoSynced = false;
+    S.est = null;
+    S.estimates = [];
+    S.attRows = {};
+    S.attendanceToday = null;
     store.del('am_token');
   }
 
@@ -414,6 +422,8 @@
     S.settings = r.settings;
     S.data = r.data;
     S.users = r.users;
+    S.estimates = r.estimates || [];
+    S.attendanceToday = r.attendanceToday || null;
   }
 
   async function saveRecord(table, record) {
@@ -522,7 +532,7 @@
   const kpi = (label, value, foot, cls) => '<div class="kpi ' + (cls || '') + '"><div class="label">' + esc(label) + '</div><div class="value num">' + value + '</div>' + (foot ? '<div class="foot">' + foot + '</div>' : '') + '</div>';
 
   function statusBadge(s) {
-    const map = { Ongoing: 'accent', Completed: 'good', 'On Hold': 'warn', Cancelled: 'bad', Active: 'good', Inactive: '', Paid: 'good', Unpaid: 'warn', Pending: 'warn', Partial: 'warn' };
+    const map = { Ongoing: 'accent', Completed: 'good', 'On Hold': 'warn', Cancelled: 'bad', Active: 'good', Inactive: '', Paid: 'good', Unpaid: 'warn', Pending: 'warn', Partial: 'warn', Present: 'good', Late: 'warn', 'Half Day': 'warn', Leave: '', Absent: 'bad', Holiday: '', Draft: '', Sent: 'accent', Approved: 'good', Rejected: 'bad', Admin: 'accent', Accountant: 'good', Staff: '' };
     return s ? '<span class="badge ' + (map[s] || '') + '">' + esc(s) + '</span>' : '';
   }
 
@@ -679,8 +689,10 @@
   // ---------------------------------------------------------------------------
   // Views: login & password
   // ---------------------------------------------------------------------------
+  const LOGO = 'https://res.cloudinary.com/diosq0s7w/image/upload/q_auto/f_auto/v1779706583/Urbane-Living-05-25-2026_04_25_PM_blepmc.png';
   function brand(sub) {
-    return '<div class="brand"><div class="brand-mark">AM</div><div><div class="brand-name">Account Master</div><div class="brand-sub">' + esc(sub || CFG.COMPANY || 'Urbane Living') + '</div></div></div>';
+    const logo = (S.settings && S.settings.company && S.settings.company.logoUrl) || LOGO;
+    return '<div class="brand"><img class="brand-logo" src="' + esc(logo) + '" alt="Urbane Living" onerror="this.outerHTML=\'<div class=&quot;brand-mark&quot;>UL</div>\'"><div><div class="brand-name">Account Master</div><div class="brand-sub">' + esc(sub || CFG.COMPANY || 'Urbane Living') + '</div></div></div>';
   }
 
   function renderLogin() {
@@ -751,24 +763,29 @@
   function renderForcedPassword() {
     $('#root').innerHTML = '<div class="login-wrap"><div class="login-card">' + brand() + '<h2 style="margin:22px 0 12px">Set a new password</h2>' + passwordForm(true) +
       '<button class="btn ghost sm" style="margin-top:12px" data-act="logout">Log out</button></div></div>';
-    bindPasswordForm(() => render());
+    bindPasswordForm(() => { render(); autoAttendance(); });
   }
 
   // ---------------------------------------------------------------------------
   // Shell
   // ---------------------------------------------------------------------------
+  // [page, label, icon, accounts-only]
   const NAV = [
-    ['dashboard', 'Dashboard', 'dashboard'],
-    ['clients', 'Clients', 'clients'],
-    ['office', 'Office expenses', 'office'],
-    ['salary', 'Employees & salary', 'salary'],
-    ['expenses', 'Employee expenses', 'expenses'],
-    ['sheet', 'Sheet data', 'sheet'],
-    ['settings', 'Settings', 'settings'],
+    ['dashboard', 'Dashboard', 'dashboard', true],
+    ['estimates', 'Estimates', 'estimate', false],
+    ['clients', 'Clients', 'clients', true],
+    ['office', 'Office expenses', 'office', true],
+    ['salary', 'Employees & salary', 'salary', true],
+    ['expenses', 'Employee expenses', 'expenses', true],
+    ['attendance', 'Attendance', 'attendance', false],
+    ['sheet', 'Sheet data', 'sheet', true],
+    ['settings', 'Settings', 'settings', false],
   ];
+  const ACCOUNT_PAGES = ['dashboard', 'clients', 'office', 'salary', 'employees', 'expenses', 'sheet'];
+  const homePage = () => (seesAccounts() ? 'dashboard' : 'estimates');
 
   function route() {
-    const parts = (location.hash.replace(/^#\/?/, '') || 'dashboard').split('/');
+    const parts = (location.hash.replace(/^#\/?/, '') || (S.user ? homePage() : 'dashboard')).split('/');
     return { page: parts[0], id: parts[1] ? decodeURIComponent(parts[1]) : '' };
   }
 
@@ -776,7 +793,7 @@
     const u = S.user;
     $('#root').innerHTML = '<div class="shell">' +
       '<aside class="sidebar">' + brand() + '<nav class="nav">' +
-      NAV.map((n) => '<a href="#/' + n[0] + '" data-nav="' + n[0] + '">' + icon(n[2]) + '<span>' + n[1] + '</span></a>').join('') + '</nav>' +
+      NAV.filter((n) => !n[3] || seesAccounts()).map((n) => '<a href="#/' + n[0] + '" data-nav="' + n[0] + '">' + icon(n[2]) + '<span>' + n[1] + '</span></a>').join('') + '</nav>' +
       '<div class="side-user"><div class="avatar">' + esc(initials(u.name)) + '</div><div class="who"><div style="font-weight:600">' + esc(u.name) + '</div><div class="small muted">' + esc(u.role) + (DEMO ? ' · Demo' : '') + '</div></div>' +
       '<button class="btn ghost icon" title="Switch theme" data-act="theme">' + icon('moon') + '</button>' +
       '<button class="btn ghost icon" title="Log out" data-act="logout">' + icon('logout') + '</button></div>' +
@@ -792,10 +809,12 @@
     const focusKey = active && active.dataset ? active.dataset.filter : null;
     const caret = focusKey && active.selectionStart !== undefined ? active.selectionStart : null;
 
-    const r = route();
+    let r = route();
+    if (ACCOUNT_PAGES.includes(r.page) && !seesAccounts()) { location.replace('#/' + homePage()); r = route(); }
+    document.body.classList.remove('print-estimate');
     $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.nav === r.page || (r.page === 'employees' && a.dataset.nav === 'salary')));
-    const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: viewExpenses, sheet: viewSheet, settings: viewSettings };
-    const fn = views[r.page] || viewDashboard;
+    const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: viewExpenses, sheet: viewSheet, settings: viewSettings, estimates: viewEstimates, attendance: viewAttendance };
+    const fn = views[r.page] || views[homePage()];
     try {
       page.innerHTML = fn(r.id);
     } catch (e) {
@@ -849,6 +868,13 @@
       kpi('Client dues', inr(dues), clients.filter((x) => x.due > 0).length + ' clients still to pay', dues > 0 ? 'bad' : '') +
       kpi('Salary pending · ' + fmtMonth(m), inr(salPending), sal.filter((s) => s.balance > 0).length + ' employees') +
       '</div>';
+    const ests = estLatestList().filter((r) => inRange(r.estimateDate, p));
+    const activeUsers = S.users.filter((u) => u.status === 'Active').length;
+    h += '<div class="kpis">' +
+      '<a href="#/estimates" style="color:inherit">' + kpi('Estimates given', String(ests.length), inr(sum(ests, 'grandTotal')) + ' quoted') + '</a>' +
+      kpi('Estimates approved', inr(sum(ests.filter((r) => r.status === 'Approved'), 'grandTotal')), plural(ests.filter((r) => r.status === 'Approved').length, 'estimate'), 'good') +
+      (['Admin', 'Accountant'].includes(S.user.role) ? '<a href="#/attendance" style="color:inherit">' + kpi('In office today', (S.todayCount === undefined ? '…' : S.todayCount) + ' / ' + activeUsers, 'Members marked present') + '</a>' : '') +
+      '</div>';
 
     h += '<div class="two-col">';
     h += '<div class="card"><div class="card-head"><h2>Money in vs money out</h2><div class="legend"><span><i style="background:var(--series-1)"></i>Received</span><span><i style="background:var(--series-2)"></i>Spent</span></div></div>' +
@@ -892,6 +918,13 @@
     return h;
   }
   viewDashboard.after = function () {
+    if (['Admin', 'Accountant'].includes(S.user.role) && S.todayFetched !== today()) {
+      S.todayFetched = today();
+      api('attendanceList', { from: today(), to: today() }).then((r) => {
+        S.todayCount = r.rows.filter((x) => ['Present', 'Late', 'Half Day'].includes(x.status)).length;
+        if (route().page === 'dashboard') renderPage();
+      }).catch(() => { S.todayFetched = null; });
+    }
     const st = ui('dashboard');
     const p = periodRange(st);
     const m = thisMonth();
@@ -1014,7 +1047,8 @@
       [c.clientCode, c.phone && '📞 ' + c.phone, c.projectType, c.workScope, c.estimateRef && 'Estimate ' + c.estimateRef, c.startDate && 'Started ' + fmtDate(c.startDate)]
         .filter(Boolean).map((x) => '<span>' + esc(x) + '</span>').join('') + '</div>' +
       (c.siteAddress ? '<div class="small muted" style="margin-top:6px">' + esc(c.siteAddress) + '</div>' : '') + '</div>' +
-      '<div class="page-actions">' + (canWrite() ? '<button class="btn" data-act="edit" data-t="Clients" data-id="' + esc(c.id) + '">' + icon('edit') + 'Edit</button>' : '') +
+      '<div class="page-actions">' + (() => { const ev = c.estimateRef && estVersions(c.estimateRef); return ev && ev.length ? '<a class="btn" href="#/estimates/' + encodeURIComponent(ev[ev.length - 1].id) + '">' + icon('estimate') + 'Estimate</a>' : ''; })() +
+      (canWrite() ? '<button class="btn" data-act="edit" data-t="Clients" data-id="' + esc(c.id) + '">' + icon('edit') + 'Edit</button>' : '') +
       '<button class="btn" data-act="print">' + icon('print') + 'Print</button></div></div></div>';
 
     h += '<div class="kpis">' +
@@ -1545,6 +1579,536 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Estimates — same document as the old estimate page, saved in the sheet.
+  // Version 1 is the original; every update is saved as a new version.
+  // ---------------------------------------------------------------------------
+  const EST_DEFAULT = {"sections":[{"title":"KITCHEN RENNOVATION","items":[{"name":"Kitchen:- Counter Top - Supply and installation of kitchen counter top with Natural Granite slab or alternative as specified, including required adhesive, cutting, edge finishing, transportation and installation labour. Base specification as per the agreed kitchen scope and approved design.","area":"60","unit":"Sft","amount":""},{"name":"Kitchen:- Hardware & Basic Fitment - Supply and installation of all required kitchen hardware and basic fitments, including soft-close hinges/channels, drawer channels, bottle pull-out, handles and other necessary hardware/accessories required for proper functioning of the modular kitchen units. Hardware to be selected and finalised as per the approved kitchen layout and design.","area":"LM","unit":"LM","amount":""},{"name":"Kitchen:- Cabinet's(lower cabinet, upper head cabinet, loft area and tall unit + Utility + Washing area cabinet in balcony area)","area":"122","unit":"Sft","amount":""},{"name":"Kitchen Dado Area:- Counter back splash area tile","area":"50","unit":"Sft","amount":""},{"name":"Breakfast Counter - Design, fabrication and installation of a customised breakfast counter as per the approved kitchen layout, including counter slab, supporting structure/carcass, required storage (if applicable), edge finishing, hardware, and complete installation labour. Final size, material, finish and detailing to be as per approved design and site measurements.","area":"LM","unit":"LM","amount":""},{"name":"Balcony Covering with Powder-Coated Aluminium & 6mm Glass - Supply and installation of balcony covering using powder-coated aluminium framing with 6mm glass, including required aluminium sections, glass panels, channels, fittings, fasteners, sealant and complete installation labour. The structure shall be properly aligned, levelled and","area":"LM","unit":"LM","amount":""}]},{"title":"LIVING ROOM + BALCONY AREA","items":[{"name":"Puja Unit - Design, fabrication and installation of a customised wooden Puja unit as per the approved design, including required storage, back panel, decorative elements, lighting provisions, hardware and final finishing. The unit shall be executed as per the approved layout and site measurements, with the final material and finish mutually agreed during design finalisation.","area":"LM","unit":"LM","amount":""},{"name":"TV Unit for Living Area - Design, fabrication and installation of a customised TV unit for the living area, including TV back panel, lower storage cabinets/drawers, required open or closed storage, hardware, channels, handles, edge finishing and complete installation labour. The unit shall be designed as per the approved living room layout, site measurements and overall interior design theme.","area":"81","unit":"Sft","amount":""},{"name":"Crockery Unit for Living Area - Design, fabrication and installation of a customised crockery/display unit for the living and dining area, including suitable storage cabinets, drawers, open display niches/shelves, shutters, required hardware and complete finishing. The size, internal storage configuration, material, laminate/finish and detailing shall be finalised as per the approved design and site measurements.","area":"81","unit":"Sft","amount":""},{"name":"Balcony covering with UPVC - Design, supply and installation of UPVC sliding/fixed frame system with toughened glass panels (5mm–6mm) for living balcony. Scope includes UPVC profiles (colour as per Owner's approval), multi point locking hardware, smooth rollers, silicone weather-sealing, mosquito mesh track, removal of existing glazing, and complete labour. System to be weather-tight and operationally smooth. Manufacturer's warranty + 12-month workmanship liability included.","area":"218","unit":"Sft","amount":""}]},{"title":"MASTER BEDROOM + BATHROOM + BALCONY","items":[{"name":"Bed back wall design + T.V. Panel - Design, fabrication and installation of customised bed back wall with integrated T.V. panel, including MDF/ply base, wallpaper/louver/panel finishes as per approved design, concealed wiring provisions for TV and accessories, decorative trim/mouldings, backlighting/cove light provisions, edge finishing, necessary hardware and complete installation labour. The unit shall be designed to create a cohesive feature wall behind the bed with a dedicated recessed/flush-mounted TV panel, as per site measurements and Owner's finalised design. 12-month workmanship warranty included.","area":"LM","unit":"LM","amount":""},{"name":"Walking closet - Design, fabrication and installation of a walk-in wardrobe configuration, including full-height wardrobes with internal partitions, shelves, hanging rods, loft storage, drawer units, soft-close hardware, internal lighting provisions, back panels, edge finishing, complete installation labour, and camouflage/concealed door finish where applicable. The layout and internal storage configuration shall be detailed and approved by the Owner before fabrication, with provisions for both hanging and folded storage as per site measurements. 12-month workmanship warranty + 10-year wooden & hardware service included.","area":"LM","unit":"LM","amount":""},{"name":"Full bathroom renovation (Master bedroom bathroom only) - Complete demolition, removal and disposal of existing tiles, sanitaryware, CP fittings, plumbing lines and old fixtures. Scope includes full wall and floor waterproofing (Dr. Fixit/Sika system with 48-hr ponding test), new vitrified tile flooring (2'x2') and wall tiling (2'x4'), 10mm toughened glass shower partition, Jaquar mid range sanitaryware and CP fittings (wall-mounted WC, cistern, overhead shower, diverter with handle+tap, basin, basin tap, health faucet, bottle trap - 3 sets), storage unit above WC, exhaust fan installation, geyser shifting into shaft, and complete plumbing. All materials and labour are included in this line item. Final tile, CP and sanitaryware selections to be approved in writing by the Owner before ordering 12-month workmanship + manufacturer warranties passed through at handover.","area":"LM","unit":"LM","amount":""},{"name":"Balcony vertical garden - Design, supply and installation of a vertical garden system on the designated master balcony wall, including modular planter panels/pockets or trellis framework, drip irrigation/drainage layer, growing medium, and selected live/artificial plantation as per Owner's final choice. Final layout, planter type and plantation selection to be approved in writing by the Owner before execution. 12-month workmanship warranty included.","area":"LM","unit":"LM","amount":""}]},{"title":"KIDS BEDROOM","items":[{"name":"Customised Bed with Study Table & Bed Back Wall Design - Kids Room - Design, fabrication and installation of a customised kids-room bed integrated with a study table and required storage, along with a customised bed back wall design. The scope includes bed structure, study table, overhead/side storage as required, back panel, decorative elements, required hardware and complete finishing. The design, dimensions, material, laminate/finish and storage configuration shall be finalised as per the approved layout and site measurements","area":"114","unit":"Sft","amount":""},{"name":"Wardrobe - Design, fabrication and installation of a customised wardrobe unit as per the approved layout, including HDHMR/Ply carcass, laminate finish (outer) and inner mica finish, soft-close hinges and channels, hanging rods, shelves, drawers, loft storage, concealed handles or pull profiles, edge banding, back panels, complete installation labour, and internal lighting provisions where required. The unit shall be designed to maximise storage as per site measurements and the Owner's storage requirements. Final design, internal configuration, material and finish to be approved in writing by the Owner before fabrication. 12 month workmanship + 10 year wooden & hardware service included","area":"42","unit":"Sft","amount":""},{"name":"Complete Bathroom Renovation - Kids Room Complete renovation of bathroom, including demolition/removal of existing finishes, new floor and wall tiles, waterproofing, sanitaryware, CP fittings, shower, basin, WC, required plumbing and installation labour, with all necessary bathroom fitments. jaguar (medium range)","area":"1","unit":"No","amount":""}]},{"title":"GUEST BEDROOM","items":[{"name":"Bay Window with Storage & Sitting + Bed Back Wall Design - Guest Room - Design, fabrication and installation of a customised bay window sealing unit with integrated sitting, comfortable sitting provision, storage cabinets/drawers below, required hardware and complete finishing. The scope also includes a customised bed back wall design with decorative panels/wall treatment as per the approved interior theme. Final dimensions, material, storage arrangement, upholstery and finishes shall be as per the approved design and site measurements.","area":"90","unit":"Sft","amount":""},{"name":"Wardrobe - Design, fabrication and installation of a customised wardrobe unit as per the approved layout, including HDHMR/Ply carcass, laminate finish (outer) and inner mica finish, soft-close hinges and channels, hanging rods, shelves, drawers, loft storage, with specified handles, edge banding, back panels, complete installation labour, and internal lighting provisions where required. The unit shall be designed to maximise storage as per site measurements and the Owner's storage requirements. Final design, internal configuration, material and finish to be approved in writing by the Owner before fabrication. 12 month workmanship + 10 year wooden & hardware service included.","area":"40","unit":"Sft","amount":""},{"name":"Common Bathroom - Complete renovation bathroom, including demolition/removal of existing finishes, new floor and wall tiles, waterproofing, sanitaryware, CP fittings, shower, basin, WC, required plumbing and installation labour, with all necessary bathroom fitments.","area":"LM","unit":"LM","amount":""}]},{"title":"ENTRY WAY","items":[{"name":"Entry way shoe rack - Design, fabrication and installation of a covered shoe rack unit outside the flat entrance door, including ply/HDHMR carcass with laminate finish, ventilated shutters, soft-close hardware, shelves angled for easy access, back panel, edge finishing, and complete installation labour. The unit will be designed to maximise shoe storage while complementing the entrance aesthetics, as per site measurements and the Owner's approved design. Final size, design, material and finish to be approved in writing by the Owner before fabrication. 12-month workmanship + 10 year wooden & hardware service included.","area":"LM","unit":"LM","amount":""},{"name":"Key Hanging Unit for Entry Area - Design, fabrication and installation of a customised key hanging unit at the entry area, including a decorative back panel, key hooks/holders, small storage compartment/shelf and required hardware. The unit shall be designed to provide convenient key storage while complementing the overall entrance décor, with material, finish, size and detailing as per the approved design and site measurements","area":"LM","unit":"LM","amount":""}]},{"title":"ELECTRICAL","items":[{"name":"Whole house electrical will be done, which include's wall and ceiling electrical wiring of all 3 bedrooms, 1 bathroom's, 3 balcony's, living room, kitchen and utility area & entry way area and wherever it is required.","area":"1500","unit":"Sft","amount":""},{"name":"Whole house switch boards will be done, which include's wall and ceiling electrical of all 3 bedrooms, 1 bathroom's, 3 balcony's, living room, kitchen and utility area & entry way area and wherever it is required.","area":"1500","unit":"Sft","amount":""},{"name":"Whole house lighting with will have ceiling lights, wall lights and pannel lights if needed will be done, which include's wall and ceiling electrical of all 3 bedroom's, 1 bathroom's, 3 balcony's, living room, kitchen and utility area & entry way area and wherever it is required. Excluding decorative lights and cendialiars","area":"1500","unit":"Sft","amount":""}]},{"title":"PAINT AND WALLPAPER","items":[{"name":"Royal paint's - Surface preparation and application of Asian Royale / Royale Luxury Emulsion or equivalent premium paint system on all internal walls and ceilings (house-wide), including primer coat (1 coat) and two top coats of Royal paint, with putty/filler application, sanding, surface smoothing, edge culling, masking, and complete labour. Scope includes all internal walls and ceiling areas as per site measurements (measured at actuals, capped at ±5% of BOQ quantity). Final shade selection to be approved in writing by the Owner before application, with sample patch approved on site. 12-month workmanship included.","area":"LM","unit":"LM","amount":""}]},{"title":"DOOR'S","items":[{"name":"Main S.S door - main stainless steel door with rust-proof for entrance made from premium SS steel finishes, with specified modern style, robust security with heavy-duty locks.","area":"LM","unit":"LM","amount":""}]},{"title":"GYPROC FALSE CEILING","items":[{"name":"GYPROC FALSE CEILING - Design, fabrication and installation of Cyproc false ceiling throughout the entire house, covering 3 bedrooms, 3 balconies, living room, dining area, kitchen and utility area. Scope includes Gypsum boards with side coves, recessed/profile light provisions, GI channel framework, edge detailing, and complete installation labour Final ceiling design, layout and lighting recess positions to be approved in writing by the Owner before execution. 12-month workmanship warranty included.","area":"LM","unit":"LM","amount":""}]},{"title":"OTHER WORK","items":[{"name":"All Door Laminate Change with Locks & Hardware - Replacement of laminate/finish on all existing doors, including necessary preparation, new laminate application, replacement/provision of required locks, handles and associated door hardware. 6 Nos. doors @ 12,500 per door","area":"6","unit":"Nos","amount":""},{"name":"Floor Tile Change - Living Room, Kitchen & Kitchen Balcony - Removal of existing flooring and supply & installation of new floor tiles in the living room, kitchen and kitchen balcony areas, including necessary laying labour and associated work","area":"600","unit":"Sft","amount":""},{"name":"AC Pipe Installation - Complete AC piping work including required refrigerant/copper piping, drainage arrangement, necessary material, accessories and labour for installation.","area":"52","unit":"Rmt","amount":""}]}],"specs":[{"cat":"Electrical","detail":"Wires and cables: Polycab, Havells, Finolex, KEI\nLights and Panel lights and Cove lights: Polycab and Havells\nSwitch and socket: Havells, Crabtree, Cona"},{"cat":"Wooden Work","detail":"HDHMR board / ply brand: Century, Actiontesa"},{"cat":"Hardware","detail":"Kitchen hardware and fitmate: Hettich, Ozone, Samsung Irex"},{"cat":"UPVC Window","detail":"Cora, simta, prominance"},{"cat":"Door Lock and Hardware","detail":"Jolly or Dorset"},{"cat":"Paint","detail":"Asian, ICI Dulux"},{"cat":"Tiles for Floor and Bathroom","detail":"Kajaria, Nitco, Somany"},{"cat":"False Ceiling","detail":"Saint-Gobain Gyproc"},{"cat":"AC Copper Piping","detail":"TATA, Malaysia Copper Pipes"}],"terms":[{"label":"A","text":"Ref to Project contract file (if any)."},{"label":"B","text":"GST 18% as per government norms Extra. (Inclusive as per contract)"},{"label":"C","text":"The final cost could vary depending on your location, specific material choice and complexity of the installation."},{"label":"D","text":"Design Authority – Designer proposes; Owner holds FINAL design and finalisation authority on all items. No fabrication/ordering before Owner's written approval."},{"label":"E","text":"Warranty – 12-month workmanship/defect liability + 10-year wooden & hardware service + manufacturer warranties passed through at handover."},{"label":"F","text":"Timeline – Total 120 days from DAY 1 of Execution, Work delivery by Day 120 (Subject to normal condition); snag closure and key handover by Day 120. Delay deduction (tolerance 10%): 0.5% per week, capped at 5%."},{"label":"G","text":"Refund Policy – No Refund shall be entertained while stoppage of work by Client or any authority."},{"label":"H","text":"Location & Execution – Service area: Gurugram, Noida, Delhi, Ghaziabad. Subject to builder/maintenance fit-out approval wherever required (Designer to obtain)."},{"label":"I","text":"Any design changes after work starts may incur additional charges."},{"label":"J","text":"Customer must provide electricity and confirm all electrical/lighting points before installation."},{"label":"K","text":"Malwa disposal, and other miscellaneous charges are extra unless specifically mentioned."},{"label":"L","text":"The company is not liable for delays or issues arising from site conditions or customer-side requirements."}]};
+  const EST_STATUS = ['Draft', 'Sent', 'Approved', 'Rejected'];
+  const ROMAN = ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'xi', 'xii', 'xiii', 'xiv', 'xv', 'xvi', 'xvii', 'xviii', 'xix', 'xx'];
+  const FIREBASE_OLD = {
+    apiKey: 'AIzaSyAzY9Sv9Q65ebYibN3jIN2NhPJTJEWbHR8', authDomain: 'urbane-living-official.firebaseapp.com', projectId: 'urbane-living-official',
+    storageBucket: 'urbane-living-official.firebasestorage.app', messagingSenderId: '777138287080', appId: '1:777138287080:web:8483bbed0858a809f5f45d',
+  };
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+  const myEmail = () => String(S.user.email).toLowerCase();
+  const estItemsTotal = (items) => items.reduce((a, i) => a + (parseFloat(i.amount) || 0), 0);
+  const estGrand = (e) => e.sections.reduce((a, s) => a + estItemsTotal(s.items), 0);
+  const estMoney = (n) => (n > 0 ? '₹' + n.toLocaleString('en-IN') : '');
+
+  function estVersions(no) {
+    return (S.estimates || []).filter((x) => x.estimateNo === no).sort((a, b) => a.version - b.version);
+  }
+  function estOwner(no) {
+    const v = estVersions(no)[0];
+    return v ? String(v.createdBy).toLowerCase() : '';
+  }
+  const canEditEst = (no) => isAdmin() || !no || estOwner(no) === myEmail();
+  function estLatestList() {
+    const by = {};
+    (S.estimates || []).forEach((r) => { if (!by[r.estimateNo] || r.version > by[r.estimateNo].version) by[r.estimateNo] = r; });
+    return Object.keys(by).map((k) => Object.assign({ versions: estVersions(k).length }, by[k]));
+  }
+  function blankEstimate() {
+    const t = (S.settings && S.settings.estimateTemplate) || EST_DEFAULT;
+    return {
+      id: '', estimateNo: '', version: 0, status: 'Draft', clientId: '', estimateDate: today(), createdBy: S.user.email,
+      client: { name: '', phone: '', address: '' }, sections: clone(t.sections), specs: clone(t.specs), terms: clone(t.terms),
+      logs: [], editing: true, newLogs: [], dirty: false,
+    };
+  }
+  function estFromRecord(r) {
+    const d = r.data || {};
+    return {
+      id: r.id, estimateNo: r.estimateNo, version: r.version, isOriginal: r.isOriginal, status: r.status || 'Draft', clientId: r.clientId,
+      estimateDate: r.estimateDate, createdBy: r.createdBy, updatedBy: r.updatedBy, updatedAt: r.updatedAt,
+      client: { name: r.clientName, phone: r.clientPhone, address: r.clientAddress },
+      sections: d.sections || [], specs: d.specs || [], terms: d.terms || [], logs: r.logs || [], editing: false, newLogs: [], dirty: false,
+    };
+  }
+
+  function viewEstimates(id) {
+    if (!id) return estList();
+    if (id === 'new') {
+      if (!S.est || S.est.id) S.est = blankEstimate();
+      return estEditor();
+    }
+    if (S.est && S.est.id === id) return estEditor();
+    if (S.estError) return '<a class="back" href="#/estimates">' + icon('back') + 'Estimates</a><div class="empty">' + esc(S.estError) + '</div>';
+    return '<div class="loading" style="min-height:300px"><div class="spinner"></div><div>Opening estimate…</div></div>';
+  }
+  viewEstimates.after = function () {
+    const id = route().id;
+    if (id && id !== 'new' && (!S.est || S.est.id !== id) && S.estLoading !== id && !S.estError) {
+      S.estLoading = id;
+      api('estimateGet', { id: id }).then((r) => {
+        S.est = estFromRecord(r.record);
+        S.estLoading = null;
+        if (route().id === id) renderPage();
+      }).catch((e) => { S.estLoading = null; S.estError = e.message; renderPage(); });
+    }
+  };
+
+  function estList() {
+    const st = ui('estimates');
+    const seeAll = ['Admin', 'Accountant', 'Viewer'].includes(S.user.role);
+    if (!st.tab) st.tab = 'list';
+    const base = st.tab === 'list' ? estLatestList() : (S.estimates || []).slice();
+    const rowsF = base.filter((r) => (!st.status || r.status === st.status) && (!st.mine || String(r.createdBy).toLowerCase() === myEmail()) &&
+      matchQ('estimates', r.estimateNo, r.clientName, r.clientAddress, userName(r.createdBy)));
+    const latest = estLatestList();
+    const val = (s) => sum(latest.filter((r) => !s || r.status === s), 'grandTotal');
+    const decided = latest.filter((r) => r.status === 'Approved' || r.status === 'Rejected').length;
+
+    let h = pageHead('Estimates', seeAll ? 'All estimates of the team · each update is kept as a new version' : 'Your estimates · each update is kept as a new version',
+      (isAdmin() ? '<button class="btn" data-act="est-firebase">' + icon('download') + 'Import old estimates</button>' : '') +
+      csvBtn('estimates') + '<a class="btn primary" href="#/estimates/new">' + icon('plus') + 'New estimate</a>');
+    h += '<div class="kpis">' + kpi('Estimates', String(latest.length), plural(latest.filter((r) => r.status === 'Draft').length, 'draft')) +
+      kpi('Total quoted', inr(val())) + kpi('Approved', inr(val('Approved')), plural(latest.filter((r) => r.status === 'Approved').length, 'estimate'), 'good') +
+      kpi('Win rate', decided ? Math.round(latest.filter((r) => r.status === 'Approved').length / decided * 100) + '%' : '—', 'Approved out of approved + rejected') + '</div>';
+    h += tabs('estimates', [['list', 'Estimates', latest.length], ['history', 'All versions', (S.estimates || []).length]], 'list');
+    h += '<div class="filters">' + searchFilter('estimates', 'Search client, estimate no, created by…') + selectFilter('estimates', 'status', 'All statuses', EST_STATUS) +
+      (seeAll ? selectFilter('estimates', 'mine', 'Everyone', [['1', 'Only mine']]) : '') + '</div>';
+    h += '<div class="card">' + dataTable('estimates', [
+      { k: 'estimateNo', l: 'Estimate', primary: true, f: (r) => '<b>' + esc(r.estimateNo) + '</b> <span class="badge">' + (r.version === 1 ? 'Original' : 'V' + r.version) + '</span>' + (st.tab === 'list' && r.versions > 1 ? '<div class="cell-sub">' + r.versions + ' versions</div>' : '') },
+      { k: 'clientName', l: 'Client', f: (r) => esc(r.clientName) + (r.clientAddress ? '<div class="cell-sub">' + esc(r.clientAddress.slice(0, 60)) + '</div>' : '') },
+      { k: 'estimateDate', l: 'Date', f: (r) => esc(fmtDate(r.estimateDate)), csv: (r) => r.estimateDate },
+      { k: 'grandTotal', l: 'Total', r: true, total: true, v: (r) => num(r.grandTotal), f: (r) => (num(r.grandTotal) ? inr(r.grandTotal) : '<span class="muted">As actual</span>') },
+      { k: 'status', l: 'Status', f: (r) => statusBadge(r.status) + (r.clientId ? '<div class="cell-sub">Client created</div>' : '') },
+      { k: 'createdBy', l: 'Created by', v: (r) => userName(r.createdBy), f: (r) => esc(userName(r.createdBy)) + (r.version > 1 ? '<div class="cell-sub">Updated by ' + esc(userName(r.updatedBy)) + '</div>' : '') },
+    ], rowsF, { onRow: 'open-est', name: 'Estimates', sort: { k: 'estimateDate', dir: 'desc' }, empty: (S.estimates || []).length ? 'No estimates match the filters' : 'No estimates yet — create the first one' }) + '</div>';
+    return h;
+  }
+
+  function estField(path, value, opts) {
+    opts = opts || {};
+    if (opts.area) return '<textarea class="ed" data-ep="' + path + '" rows="' + (opts.rows || 3) + '">' + esc(value) + '</textarea>';
+    return '<input class="ed' + (opts.r ? ' r' : '') + '" data-ep="' + path + '" value="' + esc(value) + '"' + (opts.type ? ' type="' + opts.type + '"' : '') + (opts.ph ? ' placeholder="' + esc(opts.ph) + '"' : '') + '>';
+  }
+  const estBtn = (op, label, s, i, cls) => '<button type="button" class="' + (cls || '') + '" data-act="est-op" data-op="' + op + '"' + (s !== undefined ? ' data-s="' + s + '"' : '') + (i !== undefined ? ' data-i="' + i + '"' : '') + '>' + label + '</button>';
+
+  function estDocHtml(e, editing) {
+    const c = S.settings.company || {};
+    const grand = estGrand(e);
+    const days = c.estimateValidDays || 14;
+    let h = '<div class="est-wrap"><div class="est-doc">';
+    h += '<div class="head"><div>' + (c.logoUrl ? '<img src="' + esc(c.logoUrl) + '" alt="' + esc(c.name || 'Urbane Living') + '" onerror="this.outerHTML=\'<b style=&quot;font-size:22px&quot;>' + esc(c.name || 'Urbane Living') + '</b>\'">' : '<b style="font-size:22px">' + esc(c.name || 'Urbane Living') + '</b>') + '</div>' +
+      '<div style="text-align:right"><h1>ESTIMATE</h1><div style="margin-top:5px"><div class="site">' + esc(c.website || '') + '</div><div style="font-size:15px;margin-top:3px">' + esc(c.address || '') + '</div>' +
+      (c.serviceArea ? '<div style="font-size:15px;margin-top:2px"><strong>Service Area:</strong> ' + esc(c.serviceArea) + '</div>' : '') + '</div></div></div>';
+    if (c.gstNo) h += '<div style="font-size:14px"><strong>GST No:</strong> ' + esc(c.gstNo) + '</div>';
+    h += '<div class="meta"><div style="flex:1"><p style="font-weight:700;margin:0 0 4px;font-size:14px">Bill To</p>' +
+      (editing ? estField('client.name', e.client.name, { ph: 'Client name *' }) + '<div style="height:4px"></div>' + estField('client.phone', e.client.phone, { ph: 'Mobile (optional)' }) + '<div style="height:4px"></div>' + estField('client.address', e.client.address, { ph: 'Address' })
+        : '<div style="font-weight:600">' + esc(e.client.name) + '</div>' + (e.client.phone ? '<div>' + esc(e.client.phone) + '</div>' : '') + '<div>' + esc(e.client.address) + '</div>') + '</div>' +
+      '<div style="text-align:right;font-size:14px;min-width:230px;line-height:1.5"><div><strong>Estimate No:</strong> ' + (e.estimateNo ? esc(e.estimateNo) : '<span style="color:#888">(given on save)</span>') + (e.version > 1 ? ' <span style="color:#888">(V' + e.version + ')</span>' : '') + '</div>' +
+      '<div><strong>Estimate Date:</strong> ' + (editing ? '<input class="ed" type="date" data-ep="estimateDate" value="' + esc(e.estimateDate) + '" style="width:auto">' : esc(fmtDate(e.estimateDate).replace(/ /g, '-'))) +
+      '<br><span style="font-size:10px;color:#c00000">(Valid for ' + days + ' days)</span></div>' +
+      '<div style="font-weight:700;margin-top:3px">Grand Total (INR):- <span id="est-grand">' + (grand > 0 ? estMoney(grand) : 'As Actual') + '</span></div></div></div>';
+
+    h += '<table style="margin-top:10px"><thead><tr><th style="width:35px">Sn</th><th>Product/Service</th><th style="width:85px">Area</th><th style="width:75px">Qnt/unit</th><th style="width:' + (editing ? 150 : 120) + 'px">Total</th></tr></thead><tbody>';
+    e.sections.forEach((sec, s) => {
+      h += '<tr class="sec-row"><td class="c">' + (s + 1) + '</td><td colspan="4"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center">' +
+        (editing ? '<div style="flex:1">' + estField('sections.' + s + '.title', sec.title) + '</div><span class="mini">' + estBtn('secUp', '↑', s) + estBtn('secDown', '↓', s) + estBtn('itemAdd', '+ Item', s, undefined, 'add') + estBtn('secDel', '✕ Section', s, undefined, 'del') + '</span>' : '<span>' + esc(sec.title) + '</span>') +
+        '</div></td></tr>';
+      sec.items.forEach((it, i) => {
+        h += '<tr><td class="r" style="font-style:italic">' + (ROMAN[i] || i + 1) + '</td>' +
+          '<td>' + (editing ? estField('sections.' + s + '.items.' + i + '.name', it.name, { area: true, rows: Math.min(8, Math.max(2, Math.ceil(String(it.name).length / 90))) }) : '<span class="pre">' + esc(it.name) + '</span>') + '</td>' +
+          '<td class="c">' + (editing ? estField('sections.' + s + '.items.' + i + '.area', it.area) : esc(it.area)) + '</td>' +
+          '<td class="c">' + (editing ? estField('sections.' + s + '.items.' + i + '.unit', it.unit) : esc(it.unit)) + '</td>' +
+          '<td class="r">' + (editing ? '<div style="display:flex;gap:4px;align-items:center">' + estField('sections.' + s + '.items.' + i + '.amount', it.amount, { r: true, ph: 'Amt' }) + '<span class="mini">' + estBtn('itemDel', '✕', s, i, 'del') + '</span></div>' : (it.amount ? '₹' + Number(it.amount).toLocaleString('en-IN') : '')) + '</td></tr>';
+      });
+      const st = estItemsTotal(sec.items);
+      h += '<tr class="tot-row"><td colspan="4" class="r">Total</td><td class="r"><span id="est-st-' + s + '">' + estMoney(st) + '</span></td></tr>';
+    });
+    h += '</tbody></table>';
+    if (editing) h += '<div class="mini" style="margin-top:8px">' + estBtn('secAdd', '+ Add section', undefined, undefined, 'add') + '</div>';
+
+    h += '<div class="band"><span>Material Specifications / Makes</span>' + (editing ? '<span class="mini">' + estBtn('specAdd', '+ Add spec', undefined, undefined, 'add') + '</span>' : '') + '</div>' +
+      '<table style="font-size:12px"><thead><tr><th style="width:30px">#</th><th style="width:160px">Category</th><th>Details / Brand</th>' + (editing ? '<th style="width:40px"></th>' : '') + '</tr></thead><tbody>' +
+      e.specs.map((x, i) => '<tr><td class="c">' + (i + 1) + '</td><td style="font-weight:600">' + (editing ? estField('specs.' + i + '.cat', x.cat) : esc(x.cat)) + '</td><td class="pre">' + (editing ? estField('specs.' + i + '.detail', x.detail, { area: true, rows: 3 }) : esc(x.detail)) + '</td>' +
+        (editing ? '<td class="c"><span class="mini">' + estBtn('specDel', '✕', i, undefined, 'del') + '</span></td>' : '') + '</tr>').join('') + '</tbody></table>';
+
+    h += '<div class="band"><span>Basic Terms &amp; Conditions</span>' + (editing ? '<span class="mini">' + estBtn('termAdd', '+ Add term', undefined, undefined, 'add') + '</span>' : '') + '</div>' +
+      '<table style="font-size:12px"><tbody>' + e.terms.map((t, i) => '<tr><td class="c" style="width:30px;font-weight:700">' + esc(t.label) + '</td><td>' +
+        (editing ? '<div style="display:flex;gap:6px">' + estField('terms.' + i + '.text', t.text, { area: true, rows: 2 }) + '<span class="mini">' + estBtn('termDel', '✕', i, undefined, 'del') + '</span></div>' : '<span class="pre">' + esc(t.text) + '</span>') + '</td></tr>').join('') + '</tbody></table>';
+
+    if (c.bankAccount || c.bankName || c.bankIfsc) {
+      h += '<div class="band bank">Bank Details:-</div><table style="font-size:12px"><tbody>' +
+        '<tr><td>Name: <strong>' + esc(c.name || 'Urbane Living') + '</strong></td></tr>' +
+        (c.bankAccount ? '<tr><td>Account no.: <strong>' + esc(c.bankAccount) + '</strong></td></tr>' : '') +
+        (c.bankIfsc ? '<tr><td>IFSC Code: <strong>' + esc(c.bankIfsc) + '</strong></td></tr>' : '') +
+        (c.bankName ? '<tr><td>Bank Name: <strong>' + esc(c.bankName) + '</strong></td></tr>' : '') + '</tbody></table>';
+    } else if (isAdmin()) {
+      h += '<p class="no-print" style="color:#c00000;font-size:12px;margin-top:16px">Bank details are empty — add them in Settings → Company so they print on estimates.</p>';
+    }
+    return h + '</div></div>';
+  }
+
+  function estEditor() {
+    const e = S.est;
+    const editable = canEditEst(e.estimateNo);
+    const versions = e.estimateNo ? estVersions(e.estimateNo) : [];
+    const printing = !!S.estPrint;
+    const editing = e.editing && !printing;
+    let h = '<a class="back no-print" href="#/estimates" data-act="est-back">' + icon('back') + 'Estimates</a>';
+    h += '<div class="est-toolbar no-print"><div class="group">';
+    if (editing) {
+      if (e.id) h += '<button class="btn primary" data-act="est-save" data-mode="update">' + icon('pay') + 'Save update (V' + ((versions.length ? versions[versions.length - 1].version : e.version) + 1) + ')</button>';
+      h += '<button class="btn' + (e.id ? '' : ' primary') + '" data-act="est-save" data-mode="new">' + icon('plus') + (e.id ? 'Save as new estimate' : 'Save estimate') + '</button>';
+      h += '<button class="btn" data-act="est-cancel">Cancel</button>';
+    } else {
+      if (editable) h += '<button class="btn primary" data-act="est-edit">' + icon('edit') + 'Edit estimate</button>';
+      h += '<button class="btn" data-act="est-copy">' + icon('plus') + 'Copy as new</button>';
+    }
+    h += '<a class="btn" href="#/estimates/new" data-act="est-blank">New blank</a>';
+    h += '</div><div class="group">';
+    if (e.id && (editable || canWrite())) {
+      h += '<select class="input" style="width:auto" data-act-change="est-status" aria-label="Status">' + EST_STATUS.map((x) => '<option' + (x === e.status ? ' selected' : '') + '>' + x + '</option>').join('') + '</select>';
+    }
+    if (e.id && canWrite()) {
+      const linked = e.clientId && byId('Clients', e.clientId);
+      h += linked ? '<a class="btn" href="#/clients/' + encodeURIComponent(e.clientId) + '">' + icon('clients') + 'Open client</a>'
+        : '<button class="btn" data-act="est-client">' + icon('clients') + 'Create client</button>';
+    }
+    if (isAdmin() && !editing) h += '<button class="btn" data-act="est-template" title="New estimates will start from this one">Use as template</button>';
+    h += '<button class="btn primary" data-act="est-print">' + icon('print') + 'Download PDF</button>';
+    if (e.id && editable && !editing) h += '<button class="btn ghost icon danger" title="Delete this version" data-act="est-del">' + icon('trash') + '</button>';
+    h += '</div></div>';
+    if (versions.length > 1) {
+      h += '<div class="chips no-print">' + versions.map((v) => '<a class="badge' + (v.id === e.id ? ' accent' : '') + '" href="#/estimates/' + encodeURIComponent(v.id) + '">' + (v.version === 1 ? 'Original' : 'V' + v.version) + ' · ' + esc(fmtDate(v.updatedAt ? v.updatedAt.slice(0, 10) : v.estimateDate)) + '</a>').join('') + '</div>';
+    }
+    if (!editing) {
+      h += '<div class="est-lock no-print">🔒 View mode. ' + (editable ? 'Click <b>Edit estimate</b> to change it — saving creates a new version and the original stays in history.' : 'Only ' + esc(userName(estOwner(e.estimateNo))) + ' or an Admin can edit this estimate. Use <b>Copy as new</b> to start your own from it.') + '</div>';
+    }
+    h += estDocHtml(e, editing);
+    if (e.logs && e.logs.length) {
+      h += '<div class="card no-print" style="max-width:850px;margin:16px auto 0"><div class="card-head"><h2>Edit history</h2></div><div class="card-body est-logs">' +
+        e.logs.map((l) => '<div style="padding:4px 0;border-bottom:1px solid var(--border)"><span class="muted">' + esc(fmtStamp(l.time) || l.time) + '</span> · <b>' + esc(userName(l.user)) + '</b> · ' + esc(l.action) + '</div>').join('') + '</div></div>';
+    }
+    return h;
+  }
+
+  function estSetPath(obj, path, value) {
+    const parts = path.split('.');
+    let o = obj;
+    for (let i = 0; i < parts.length - 1; i++) o = o[parts[i]];
+    o[parts[parts.length - 1]] = value;
+  }
+
+  function estOnInput(el) {
+    const e = S.est;
+    if (!e || !e.editing) return;
+    estSetPath(e, el.dataset.ep, el.value);
+    e.dirty = true;
+    const m = el.dataset.ep.match(/^sections\.(\d+)\.items\.\d+\.amount$/);
+    if (m) {
+      const s = Number(m[1]);
+      const st = $('#est-st-' + s);
+      if (st) st.textContent = estMoney(estItemsTotal(e.sections[s].items));
+      const g = $('#est-grand');
+      const grand = estGrand(e);
+      if (g) g.textContent = grand > 0 ? estMoney(grand) : 'As Actual';
+    }
+  }
+
+  function estOp(op, s, i) {
+    const e = S.est;
+    if (!e || !e.editing) return;
+    const L = (msg) => e.newLogs.push(msg);
+    const sec = e.sections[s];
+    switch (op) {
+      case 'secAdd': e.sections.push({ title: 'NEW SECTION TITLE', items: [{ name: 'New item description', area: '0', unit: 'Sft', amount: '' }] }); L('Added a section'); break;
+      case 'secDel': if (!confirm('Delete section "' + sec.title + '"?')) return; e.sections.splice(s, 1); L('Deleted section ' + sec.title); break;
+      case 'secUp': if (s > 0) e.sections.splice(s - 1, 0, e.sections.splice(s, 1)[0]); break;
+      case 'secDown': if (s < e.sections.length - 1) e.sections.splice(s + 1, 0, e.sections.splice(s, 1)[0]); break;
+      case 'itemAdd': sec.items.push({ name: 'New item description', area: '0', unit: 'Sft', amount: '' }); L('Added an item in ' + sec.title); break;
+      case 'itemDel': sec.items.splice(i, 1); L('Removed an item from ' + sec.title); break;
+      case 'specAdd': e.specs.push({ cat: 'New category', detail: 'Specification details here' }); L('Added a spec'); break;
+      case 'specDel': L('Deleted spec ' + e.specs[s].cat); e.specs.splice(s, 1); break;
+      case 'termAdd': e.terms.push({ label: String.fromCharCode(65 + e.terms.length), text: 'New term details here' }); L('Added a term'); break;
+      case 'termDel': e.terms.splice(s, 1); e.terms.forEach((t, k) => { t.label = String.fromCharCode(65 + k); }); L('Deleted a term'); break;
+    }
+    e.dirty = true;
+    const y = window.scrollY;
+    renderPage();
+    window.scrollTo(0, y);
+  }
+
+  async function estSave(mode, btn) {
+    const e = S.est;
+    if (!String(e.client.name || '').trim()) return toast('Enter the client name (Bill To) first', true);
+    btn.disabled = true;
+    try {
+      const r = await api('estimateSave', {
+        mode: mode,
+        record: { estimateNo: e.estimateNo, estimateDate: e.estimateDate, client: e.client, data: { sections: e.sections, specs: e.specs, terms: e.terms }, newLogs: e.newLogs },
+      });
+      S.estimates = r.estimates;
+      S.est = estFromRecord(r.record);
+      toast(mode === 'new' ? 'Estimate ' + r.record.estimateNo + ' saved' : 'Saved as V' + r.record.version + ' — earlier versions are kept');
+      location.hash = '#/estimates/' + encodeURIComponent(r.record.id);
+      renderPage();
+    } catch (err) {
+      toast(err.message, true);
+      btn.disabled = false;
+    }
+  }
+
+  function estPrint() {
+    const e = S.est;
+    const title = document.title;
+    S.estPrint = true;
+    renderPage();
+    document.body.classList.add('print-estimate');
+    document.title = 'Urbane_Living_Estimate_' + (e.estimateNo || 'draft') + '_' + String(e.client.name || '').replace(/[^\w]+/g, '_');
+    const done = () => {
+      document.body.classList.remove('print-estimate');
+      document.title = title;
+      S.estPrint = false;
+      renderPage();
+      window.removeEventListener('afterprint', done);
+    };
+    window.addEventListener('afterprint', done);
+    setTimeout(() => { window.print(); setTimeout(() => { if (S.estPrint) done(); }, 500); }, 120);
+  }
+
+  function loadScript(src) {
+    return new Promise((res, rej) => {
+      if ($('script[src="' + src + '"]')) return res();
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = res;
+      s.onerror = () => rej(new Error('Could not load ' + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  function openFirebaseImport() {
+    openModal('Import estimates from the old estimate page', '<p style="margin-top:0">This copies every saved estimate (originals and updated versions, with their edit history) from the old Firebase estimate page into this dashboard. Nothing is deleted from Firebase, and estimates already copied are skipped, so it is safe to run again.</p>' +
+      '<ol class="small" style="padding-left:18px;line-height:1.7"><li>One-time: in the <b>Firebase console → Authentication → Settings → Authorized domains</b>, add <code>' + esc(location.hostname) + '</code>.</li>' +
+      '<li>Click <b>Sign in with Google &amp; import</b> and choose an email that could use the old estimate page.</li></ol><div id="fb-status" class="small muted"></div>', {
+      submit: 'Sign in with Google & import',
+      onSubmit: async () => {
+        const status = $('#fb-status');
+        const say = (m) => { if (status) status.textContent = m; };
+        const v = '10.12.2';
+        say('Loading Firebase…');
+        await loadScript('https://www.gstatic.com/firebasejs/' + v + '/firebase-app-compat.js');
+        await loadScript('https://www.gstatic.com/firebasejs/' + v + '/firebase-auth-compat.js');
+        await loadScript('https://www.gstatic.com/firebasejs/' + v + '/firebase-firestore-compat.js');
+        const fb = window.firebase;
+        const app = fb.apps.find((a) => a.name === 'ulOldEstimates') || fb.initializeApp(FIREBASE_OLD, 'ulOldEstimates');
+        say('Waiting for Google sign-in…');
+        await app.auth().signInWithPopup(new fb.auth.GoogleAuthProvider());
+        say('Reading estimates…');
+        const db = app.firestore();
+        const [a, b] = await Promise.all([db.collection('ul_estimates_original').get(), db.collection('ul_estimates_updated').get()]);
+        const recs = a.docs.map((d) => [d.data(), 1]).concat(b.docs.map((d) => [d.data(), (Number(d.data().version) || 1) + 1])).map(([x, ver]) => ({
+          estimateNo: x.originalEstimateNo || x.estimateNo, version: ver, estimateDate: x.estimateDate, client: x.client || {},
+          sections: x.sections || [], specs: x.specs || [], terms: x.terms || [], editLogs: x.editLogs || [],
+          createdBy: x.createdBy, updatedBy: x.updatedBy || x.createdBy, updatedAt: x.updatedAt || '',
+        }));
+        let done = 0;
+        for (let k = 0; k < recs.length; k += 25) {
+          say('Saving ' + Math.min(k + 25, recs.length) + ' of ' + recs.length + '…');
+          const r = await api('estimateImport', { records: recs.slice(k, k + 25) });
+          done += r.imported;
+          S.estimates = r.estimates;
+        }
+        await app.auth().signOut();
+        toast(done + ' estimates imported (' + (recs.length - done) + ' were already here)');
+        renderPage();
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Attendance — marked automatically when someone opens the dashboard from the
+  // office network. The browser reports its public IP; the server checks it.
+  // ---------------------------------------------------------------------------
+  const ATT_STATUS = ['Present', 'Late', 'Half Day', 'Leave', 'Absent', 'Holiday'];
+  const ATT_CODE = { Present: 'P', Late: 'L', 'Half Day': 'H', Leave: 'LV', Absent: 'A', Holiday: 'HO' };
+
+  function v6Groups(ip) {
+    if (ip.indexOf(':') < 0) return null;
+    const parts = ip.split('::');
+    const head = parts[0] ? parts[0].split(':') : [];
+    const tail = parts.length > 1 && parts[1] ? parts[1].split(':') : [];
+    const fill = parts.length > 1 ? new Array(Math.max(0, 8 - head.length - tail.length)).fill('0') : [];
+    return head.concat(fill, tail).map((g) => (g.replace(/^0+/, '') || '0').toLowerCase());
+  }
+  function ipAllowed(ip) {
+    const a = S.settings.attendance || {};
+    ip = String(ip || '').trim().toLowerCase();
+    if (!ip) return false;
+    return (a.ipPrefixes || []).some((p) => {
+      p = String(p).trim().toLowerCase().replace(/\/\d+$/, '').replace(/[:.]+$/, '');
+      if (!p) return false;
+      if (p.indexOf(':') >= 0) {
+        const ig = v6Groups(ip);
+        const pg = p.split(':').map((g) => (g.replace(/^0+/, '') || '0'));
+        return !!ig && pg.every((g, k) => ig[k] === g);
+      }
+      return ip === p || ip.indexOf(p + '.') === 0;
+    });
+  }
+  const netPrefix = (ip) => (ip.indexOf(':') >= 0 ? v6Groups(ip).slice(0, 4).join(':') : ip);
+
+  async function publicIps(force) {
+    if (S.ips && !force && Date.now() - S.ips.at < 120000) return S.ips;
+    const get = (u) => Promise.race([fetch(u).then((r) => r.json()).then((j) => j.ip), new Promise((res) => setTimeout(() => res(''), 6000))]).catch(() => '');
+    const [a, b] = await Promise.all([get('https://api64.ipify.org?format=json'), get('https://api.ipify.org?format=json')]);
+    const list = [a, b].filter(Boolean).filter((x, k, arr) => arr.indexOf(x) === k);
+    S.ips = { at: Date.now(), list: list };
+    return S.ips;
+  }
+  function getGeo() {
+    return new Promise((res, rej) => {
+      if (!navigator.geolocation) return rej(new Error('Location is not available on this device'));
+      navigator.geolocation.getCurrentPosition((p) => res(p.coords), () => rej(new Error('Location permission was denied')), { enableHighAccuracy: true, timeout: 15000 });
+    });
+  }
+
+  async function markAttendance(kind, useGeo) {
+    const ips = await publicIps(true);
+    const ip = ips.list.find(ipAllowed) || ips.list[0] || '';
+    let lat = '';
+    let lng = '';
+    if (!ipAllowed(ip) && useGeo) { const g = await getGeo(); lat = g.latitude; lng = g.longitude; }
+    const r = await api('attendanceMark', { kind: kind, ip: ip, lat: lat, lng: lng });
+    S.attendanceToday = r.record;
+    S.attRows = {};
+    S.todayFetched = null;
+    return r;
+  }
+
+  async function autoAttendance() {
+    const a = S.settings && S.settings.attendance;
+    if (!a || !a.autoMark || !S.user) return;
+    try {
+      const ips = await publicIps();
+      if (!ips.list.some(ipAllowed)) return;
+      const r = await markAttendance(S.attendanceToday ? 'out' : 'in');
+      if (r.action === 'in') toast('Attendance marked · ' + r.record.checkIn + (r.record.status === 'Late' ? ' (late)' : ''));
+      if (route().page === 'attendance') renderPage();
+    } catch (e) { /* not in office or offline — nothing to do */ }
+  }
+
+  function attHours(r) {
+    if (!r || !r.checkIn || !r.checkOut) return 0;
+    const t = (x) => Number(x.slice(0, 2)) * 60 + Number(x.slice(3, 5));
+    return Math.max(0, (t(r.checkOut) - t(r.checkIn)) / 60);
+  }
+  const fmtHours = (h) => (h ? Math.floor(h) + 'h ' + pad(Math.round((h % 1) * 60)) + 'm' : '');
+
+  function viewAttendance() {
+    const st = ui('attendance');
+    if (!st.month) st.month = thisMonth();
+    const team = ['Admin', 'Accountant'].includes(S.user.role);
+    const t = S.attendanceToday;
+    const ips = S.ips;
+    const inOffice = ips && ips.list.some(ipAllowed);
+    const geoOn = S.settings.attendance && S.settings.attendance.geo && S.settings.attendance.geo.enabled;
+    let h = pageHead('Attendance', 'Marked automatically when you open the dashboard from the office network', '');
+    h += '<div class="card" style="margin-bottom:16px"><div class="card-body" style="display:flex;gap:16px;justify-content:space-between;align-items:center;flex-wrap:wrap">' +
+      '<div><div class="small muted">Today · ' + esc(fmtDate(today())) + '</div><div style="font-size:20px;font-weight:700;margin:4px 0">' +
+      (t ? statusBadge(t.status) + ' In ' + esc(t.checkIn) + (t.checkOut ? ' · Out / last seen ' + esc(t.checkOut) : '') : 'Not marked yet') + '</div>' +
+      '<div class="small ' + (ips ? (inOffice ? 'pos' : 'neg') : 'muted') + '">' + (ips ? (inOffice ? '✓ On office network' : '✗ Not on office network') + ' · IP ' + esc(ips.list.join(', ') || 'unknown') : 'Checking your network…') + '</div></div>' +
+      '<div class="page-actions">' + (!t ? '<button class="btn primary" data-act="att-mark" data-kind="in">Check in</button>' : '<button class="btn" data-act="att-mark" data-kind="out">Check out</button>') +
+      (geoOn && !inOffice ? '<button class="btn" data-act="att-mark" data-kind="' + (t ? 'out' : 'in') + '" data-geo="1">Use my location</button>' : '') + '</div></div></div>';
+    if (team) h += tabs('attendance', [['me', 'My attendance'], ['team', 'Team']], 'me');
+    else st.tab = 'me';
+    h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Month">' + (st.tab === 'team' ? '<button class="btn sm" data-act="att-csv">' + icon('download') + 'Export</button>' : '') + '</div>';
+    const rowsM = S.attRows && S.attRows[st.month];
+    if (!rowsM) return h + '<div class="loading" style="min-height:160px"><div class="spinner"></div></div>';
+
+    if (st.tab !== 'team') {
+      const mine = rowsM.filter((r) => r.email.toLowerCase() === myEmail());
+      const hrs = mine.map(attHours).filter(Boolean);
+      h += '<div class="kpis">' + kpi('Days present', String(mine.filter((r) => ['Present', 'Late', 'Half Day'].includes(r.status)).length)) +
+        kpi('Late', String(mine.filter((r) => r.status === 'Late').length)) + kpi('Leave', String(mine.filter((r) => r.status === 'Leave').length)) +
+        kpi('Average hours', hrs.length ? fmtHours(hrs.reduce((a, b) => a + b, 0) / hrs.length) : '—') + '</div>';
+      h += '<div class="card">' + dataTable('att-me', [
+        { k: 'date', l: 'Date', primary: true, f: (r) => esc(fmtDate(r.date)) + ' <span class="muted small">' + new Date(r.date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short' }) + '</span>' },
+        { k: 'status', l: 'Status', f: (r) => statusBadge(r.status) },
+        { k: 'checkIn', l: 'In', f: (r) => esc(r.checkIn) },
+        { k: 'checkOut', l: 'Out / last seen', f: (r) => esc(r.checkOut) },
+        { k: 'hours', l: 'Hours', r: true, v: attHours, f: (r) => fmtHours(attHours(r)) },
+        { k: 'method', l: 'Marked by', f: (r) => esc(r.method) + (r.notes ? '<div class="cell-sub">' + esc(r.notes) + '</div>' : '') },
+      ], mine, { sort: { k: 'date', dir: 'desc' }, empty: 'No attendance this month' }) + '</div>';
+      return h;
+    }
+
+    const members = S.users.filter((u) => u.status === 'Active');
+    const days = Number(monthEnd(st.month).slice(8));
+    const td = today();
+    const byKey = {};
+    rowsM.forEach((r) => { byKey[r.email.toLowerCase() + '|' + r.date] = r; });
+    // Days before attendance was first recorded are left blank, not marked absent.
+    const firstDay = rowsM.reduce((m, r) => (r.method !== 'Manual (Admin)' && (!m || r.date < m) ? r.date : m), '');
+    h += '<div class="card"><div class="table-wrap"><table class="data att-grid"><thead><tr><th>Member</th>';
+    for (let d = 1; d <= days; d++) {
+      const ds = st.month + '-' + pad(d);
+      const wd = new Date(ds + 'T00:00:00').getDay();
+      h += '<th' + (wd === 0 ? ' style="color:var(--muted)"' : '') + '>' + d + '</th>';
+    }
+    h += '<th>P</th><th>L</th><th>LV</th><th>A</th></tr></thead><tbody>';
+    S.attGrid = [];
+    members.forEach((u) => {
+      const cnt = { P: 0, L: 0, LV: 0, A: 0 };
+      const line = [u.name];
+      h += '<tr><td><b>' + esc(u.name) + '</b><div class="cell-sub">' + esc(u.designation || u.role) + '</div></td>';
+      for (let d = 1; d <= days; d++) {
+        const ds = st.month + '-' + pad(d);
+        const r = byKey[u.email.toLowerCase() + '|' + ds];
+        const wd = new Date(ds + 'T00:00:00').getDay();
+        let code = r ? ATT_CODE[r.status] || '?' : (firstDay && ds >= firstDay && ds < td && wd !== 0 ? 'A' : '');
+        if (code === 'P' || code === 'L' || code === 'H') cnt.P++;
+        if (code === 'L') cnt.L++;
+        if (code === 'LV') cnt.LV++;
+        if (code === 'A') cnt.A++;
+        line.push(code);
+        const tip = r ? r.status + (r.checkIn ? ' · ' + r.checkIn : '') + (r.checkOut ? '–' + r.checkOut : '') + (r.notes ? ' · ' + r.notes : '') : (code === 'A' ? 'No attendance' : '');
+        h += '<td>' + (code || isAdmin() ? '<span class="att-cell ' + code + (isAdmin() ? ' clickable' : '') + '" title="' + esc(tip) + '"' + (isAdmin() ? ' data-act="att-edit" data-email="' + esc(u.email) + '" data-date="' + ds + '"' : '') + '>' + (code || '·') + '</span>' : '') + '</td>';
+      }
+      h += '<td><b>' + cnt.P + '</b></td><td>' + cnt.L + '</td><td>' + cnt.LV + '</td><td>' + cnt.A + '</td></tr>';
+      S.attGrid.push(line.concat([cnt.P, cnt.L, cnt.LV, cnt.A]));
+    });
+    h += '</tbody></table></div></div><p class="small muted">P present · L late (after ' + esc((S.settings.attendance || {}).startTime || '10:00') + ') · H half day · LV leave · HO holiday · A no attendance on a working day (Sundays skipped).' + (isAdmin() ? ' Click a day to correct it.' : '') + '</p>';
+    return h;
+  }
+  viewAttendance.after = function () {
+    const st = ui('attendance');
+    if (!S.attRows) S.attRows = {};
+    if (!S.attRows[st.month] && S.attLoading !== st.month) {
+      S.attLoading = st.month;
+      api('attendanceList', { from: st.month + '-01', to: monthEnd(st.month) }).then((r) => {
+        S.attRows[st.month] = r.rows;
+        S.attLoading = null;
+        if (route().page === 'attendance') renderPage();
+      }).catch((e) => { S.attLoading = null; toast(e.message, true); });
+    }
+    if (!S.ips) publicIps().then(() => { if (route().page === 'attendance') renderPage(); });
+  };
+
+  function openAttEdit(email, date) {
+    const u = S.users.find((x) => x.email.toLowerCase() === email.toLowerCase());
+    const r = (S.attRows[ui('attendance').month] || []).find((x) => x.email.toLowerCase() === email.toLowerCase() && x.date === date) || {};
+    openModal('Attendance · ' + (u ? u.name : email) + ' · ' + fmtDate(date), '<div class="form-grid">' +
+      '<label class="field">Status<select class="input" name="status">' + ATT_STATUS.map((s) => '<option' + (s === (r.status || 'Present') ? ' selected' : '') + '>' + s + '</option>').join('') + '</select></label><span></span>' +
+      '<label class="field">In<input class="input" type="time" name="checkIn" value="' + esc(r.checkIn || '') + '"></label>' +
+      '<label class="field">Out<input class="input" type="time" name="checkOut" value="' + esc(r.checkOut || '') + '"></label>' +
+      '<label class="field full">Note<input class="input" name="notes" value="' + esc(r.notes || '') + '" placeholder="e.g. Site visit, sick leave"></label></div>' +
+      (r.ip ? '<p class="small muted">Marked from ' + esc(r.method || '') + ' · IP ' + esc(r.ip) + '</p>' : ''), {
+      submit: 'Save',
+      onSubmit: async (f) => {
+        await api('attendanceSave', { record: { email: email, date: date, status: f.status.value, checkIn: f.checkIn.value, checkOut: f.checkOut.value, notes: f.notes.value } });
+        delete S.attRows[ui('attendance').month];
+        toast('Attendance updated');
+        renderPage();
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Settings
   // ---------------------------------------------------------------------------
   const LIST_LABELS = {
@@ -1556,7 +2120,7 @@
     const st = ui('settings');
     const items = [['profile', 'My profile']];
     if (canWrite()) items.push(['lists', 'Dropdown lists']);
-    if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['import', 'Import data'], ['activity', 'Activity log']);
+    if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['attendance', 'Attendance'], ['import', 'Import data'], ['activity', 'Activity log']);
     if (!items.some((i) => i[0] === st.tab)) st.tab = 'profile';
     let h = pageHead('Settings', '');
     h += tabs('settings', items, 'profile');
@@ -1566,7 +2130,7 @@
       h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Profile</h2></div><div class="card-body"><div class="breakdown">' +
         '<span class="muted">Name</span><span>' + esc(u.name) + '</span><span class="muted">Email</span><span>' + esc(u.email) + '</span>' +
         '<span class="muted">Designation</span><span>' + esc(u.designation) + '</span><span class="muted">Access</span><span>' + statusBadge(u.role) + '</span></div>' +
-        '<p class="small muted" style="margin-bottom:0">Admin: everything incl. members · Accountant: add / edit all records · Viewer: read only</p></div></div>' +
+        '<p class="small muted" style="margin-bottom:0">Admin (CEO, COO, VP Sales, IT): everything · Accountant: accounts + own estimates · Viewer: read-only accounts · Staff: own estimates and attendance</p></div></div>' +
         '<div class="card"><div class="card-head"><h2>Change password</h2></div><div class="card-body">' + passwordForm(false) + '</div></div></div>';
     } else if (st.tab === 'lists') {
       h += '<p class="muted" style="margin-top:0">One item per line. These options appear in the dropdowns across the app.</p>';
@@ -1589,10 +2153,31 @@
       }) + '</div>';
     } else if (st.tab === 'company') {
       const c = S.settings.company;
-      h += '<div class="card" style="max-width:520px"><div class="card-body"><form id="company-form" style="display:flex;flex-direction:column;gap:14px">' +
-        '<label class="field">Company name<input class="input" name="name" value="' + esc(c.name) + '"></label>' +
-        '<label class="field">Default bike rate per km (₹)<input class="input" name="perKmRate" type="number" step="any" value="' + esc(c.perKmRate) + '"><span class="field-hint">Used for employee travel unless the employee has their own rate</span></label>' +
-        '<div><button class="btn primary" type="submit">Save</button></div></form></div></div>';
+      const f = (k, l, hint, type) => '<label class="field">' + l + '<input class="input" name="' + k + '"' + (type ? ' type="' + type + '" step="any"' : '') + ' value="' + esc(c[k] === undefined ? '' : c[k]) + '">' + (hint ? '<span class="field-hint">' + hint + '</span>' : '') + '</label>';
+      h += '<form id="company-form"><div class="two-col"><div class="card"><div class="card-head"><h2>Company</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:14px">' +
+        f('name', 'Company name') + f('website', 'Website') + f('gstNo', 'GST No') + f('address', 'Address (printed on estimates)') + f('serviceArea', 'Service area') +
+        f('logoUrl', 'Logo URL', 'Shown in the app and on estimates') + f('perKmRate', 'Default bike rate per km (₹)', 'Used for employee travel unless the employee has their own rate', 'number') +
+        '</div></div><div class="card"><div class="card-head"><h2>Estimates</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:14px">' +
+        f('bankName', 'Bank name') + f('bankAccount', 'Account no.') + f('bankIfsc', 'IFSC code') +
+        f('estimatePrefix', 'Estimate number prefix', 'Number = prefix + month + day + counter, e.g. RFIUL1101227') + f('estimateValidDays', 'Valid for (days)', '', 'number') +
+        '<label class="field">Last estimate counter<input class="input" name="estimateCounter" type="number" value="' + esc(S.settings.estimateCounter) + '"><span class="field-hint">The next estimate gets this + 1. Set it above the last number used on the old estimate page.</span></label>' +
+        (S.settings.estimateTemplate ? '<button type="button" class="btn sm" data-act="tpl-reset" style="align-self:flex-start">Reset estimate template to default</button>' : '') +
+        '</div></div></div><button class="btn primary" type="submit">Save</button></form>';
+    } else if (st.tab === 'attendance') {
+      const a = S.settings.attendance;
+      h += '<form id="att-form"><div class="two-col"><div class="card"><div class="card-head"><h2>Office network</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:14px">' +
+        '<label class="field">Allowed office IP prefixes<textarea class="input" name="ipPrefixes" rows="4">' + esc(a.ipPrefixes.join('\n')) + '</textarea>' +
+        '<span class="field-hint">One per line. For IPv6 use the first 4 groups (the office network), e.g. 2406:b400:71:93ee — each device in the office gets its own address inside it. For IPv4 use the full public IP.</span></label>' +
+        '<button type="button" class="btn" data-act="att-net" style="align-self:flex-start">Add the network I am on now</button>' +
+        '<label class="field">Office start time<input class="input" type="time" name="startTime" value="' + esc(a.startTime) + '"><span class="field-hint">Check-in after this time is marked Late</span></label>' +
+        '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="autoMark"' + (a.autoMark ? ' checked' : '') + '> Mark attendance automatically when someone opens the dashboard in the office</label>' +
+        '</div></div><div class="card"><div class="card-head"><h2>Office location (optional)</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:14px">' +
+        '<p class="muted" style="margin:0">Backup for days the office internet is down: allow check-in by phone location within a radius of the office. G-12, Express Green Plaza, Sector 1, Vaishali.</p>' +
+        '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="geoEnabled"' + (a.geo.enabled ? ' checked' : '') + '> Allow check-in by location</label>' +
+        '<div class="form-grid"><label class="field">Latitude<input class="input" name="lat" value="' + esc(a.geo.lat) + '"></label><label class="field">Longitude<input class="input" name="lng" value="' + esc(a.geo.lng) + '"></label></div>' +
+        '<label class="field">Radius (metres)<input class="input" type="number" name="radius" value="' + esc(a.geo.radius) + '"></label>' +
+        '<button type="button" class="btn" data-act="att-here" style="align-self:flex-start">Use my current location (stand in the office)</button>' +
+        '</div></div></div><button class="btn primary" type="submit">Save</button></form>';
     } else if (st.tab === 'import') {
       const imps = S.settings.imports || [];
       h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Import from a file</h2></div><div class="card-body">' +
@@ -1629,9 +2214,26 @@
       $('#company-form').addEventListener('submit', async (e) => {
         e.preventDefault();
         try {
-          const r = await api('saveSettings', { settings: { company: { name: e.target.name.value, perKmRate: e.target.perKmRate.value } } });
+          const fd = e.target.elements;
+          const company = {};
+          ['name', 'website', 'gstNo', 'address', 'serviceArea', 'logoUrl', 'perKmRate', 'bankName', 'bankAccount', 'bankIfsc', 'estimatePrefix', 'estimateValidDays'].forEach((k) => { company[k] = fd[k].value; });
+          const r = await api('saveSettings', { settings: { company: company, estimateCounter: fd.estimateCounter.value } });
           S.settings = r.settings;
           toast('Company settings saved');
+        } catch (ex) { toast(ex.message, true); }
+      });
+    }
+    if (st.tab === 'attendance') {
+      $('#att-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = e.target.elements;
+        try {
+          const r = await api('saveSettings', { settings: { attendance: {
+            ipPrefixes: fd.ipPrefixes.value.split('\n').map((x) => x.trim()).filter(Boolean), startTime: fd.startTime.value, autoMark: fd.autoMark.checked,
+            geo: { enabled: fd.geoEnabled.checked, lat: fd.lat.value, lng: fd.lng.value, radius: fd.radius.value },
+          } } });
+          S.settings = r.settings;
+          toast('Attendance settings saved');
         } catch (ex) { toast(ex.message, true); }
       });
     }
@@ -1684,7 +2286,7 @@
       '<label class="field">Designation<input class="input" name="designation" value="' + esc(u.designation || '') + '"></label>' +
       '<label class="field">Email (login ID)<input class="input" type="email" name="email" value="' + esc(u.email || '') + '"></label>' +
       '<label class="field">Mobile<input class="input" type="tel" name="phone" value="' + esc(u.phone || '') + '"></label>' +
-      '<label class="field">Access<select class="input" name="role">' + opt(['Admin', 'Accountant', 'Viewer'], u.role) + '</select></label>' +
+      '<label class="field">Access<select class="input" name="role">' + opt(['Admin', 'Accountant', 'Viewer', 'Staff'], u.role) + '</select></label>' +
       '<label class="field">Status<select class="input" name="status">' + opt(['Active', 'Inactive'], u.status) + '</select></label>' +
       (isNew ? '<label class="field full">One-time password<input class="input" name="password" type="text" autocomplete="off" value="' + esc(tempPassword()) + '"><span class="field-hint">Share this with the member. They must set their own password at first login.</span></label>' : '') +
       '</div>';
@@ -1736,6 +2338,9 @@
       case 'nav-open': $('.shell').classList.add('nav-open'); break;
       case 'nav-close': $('.shell').classList.remove('nav-open'); break;
       case 'logout':
+        if (S.attendanceToday && S.ips && S.ips.list.some(ipAllowed)) {
+          await Promise.race([markAttendance('out').catch(() => null), new Promise((res) => setTimeout(res, 3000))]);
+        }
         try { await api('logout'); } catch (err) { /* already logged out */ }
         clearSession();
         render();
@@ -1805,6 +2410,89 @@
         syncEmployees(false).catch((err) => toast(err.message, true)).finally(() => { el.disabled = false; });
         break;
       case 'print': window.print(); break;
+      case 'open-est': if (!e.target.closest('button, a')) location.hash = '#/estimates/' + encodeURIComponent(el.dataset.id); break;
+      case 'est-op': estOp(el.dataset.op, Number(el.dataset.s), Number(el.dataset.i)); break;
+      case 'est-edit': S.est.editing = true; S.est.newLogs = []; renderPage(); break;
+      case 'est-cancel':
+        if (S.est.dirty && !confirm('Discard your changes?')) break;
+        if (S.est.id) { const id = S.est.id; S.est = null; S.estError = null; location.hash = '#/estimates/' + encodeURIComponent(id); renderPage(); } else { S.est = null; location.hash = '#/estimates'; }
+        break;
+      case 'est-back': case 'est-blank':
+        if (S.est && S.est.editing && S.est.dirty && !confirm('Discard your changes?')) { e.preventDefault(); break; }
+        if (act === 'est-blank') { e.preventDefault(); S.est = blankEstimate(); location.hash = '#/estimates/new'; renderPage(); }
+        break;
+      case 'est-copy': {
+        const c = S.est;
+        S.est = Object.assign(blankEstimate(), { client: clone(c.client), sections: clone(c.sections), specs: clone(c.specs), terms: clone(c.terms), newLogs: ['Copied from ' + c.estimateNo + ' V' + c.version], dirty: true });
+        location.hash = '#/estimates/new';
+        renderPage();
+        break;
+      }
+      case 'est-save': estSave(el.dataset.mode, el); break;
+      case 'est-print': estPrint(); break;
+      case 'est-del':
+        if (!confirm('Delete ' + S.est.estimateNo + (S.est.version > 1 ? ' V' + S.est.version : ' (original)') + '? Other versions stay.')) break;
+        try { const r = await api('estimateDelete', { id: S.est.id }); S.estimates = r.estimates; S.est = null; toast('Deleted'); location.hash = '#/estimates'; } catch (err) { toast(err.message, true); }
+        break;
+      case 'est-client':
+        if (!confirm('Create a client from ' + S.est.estimateNo + ' with approved amount ' + inr(estGrand(S.est)) + '?')) break;
+        try {
+          const r = await api('estimateToClient', { estimateNo: S.est.estimateNo });
+          S.estimates = r.estimates;
+          (S.data.Clients || (S.data.Clients = [])).push(r.client);
+          S.est.clientId = r.client.id;
+          S.est.status = 'Approved';
+          toast('Client ' + r.client.name + ' created');
+          renderPage();
+        } catch (err) { toast(err.message, true); }
+        break;
+      case 'est-template':
+        if (!confirm('Make this estimate the starting template for every new estimate? (Amounts are cleared.)')) break;
+        try {
+          const tpl = { sections: clone(S.est.sections).map((x) => ({ title: x.title, items: x.items.map((i) => Object.assign(i, { amount: '' })) })), specs: clone(S.est.specs), terms: clone(S.est.terms) };
+          const r = await api('saveSettings', { settings: { estimateTemplate: tpl } });
+          S.settings = r.settings;
+          toast('Template saved');
+        } catch (err) { toast(err.message, true); }
+        break;
+      case 'est-firebase': openFirebaseImport(); break;
+      case 'tpl-reset':
+        if (!confirm('Go back to the built-in estimate template?')) break;
+        try { const r = await api('saveSettings', { settings: { estimateTemplate: null } }); S.settings = r.settings; toast('Template reset'); renderPage(); } catch (err) { toast(err.message, true); }
+        break;
+      case 'att-mark':
+        el.disabled = true;
+        try {
+          const r = await markAttendance(el.dataset.kind, !!el.dataset.geo);
+          toast(r.action === 'in' ? 'Checked in · ' + r.record.checkIn : r.action === 'out' ? 'Checked out · ' + r.record.checkOut : 'Already checked in');
+        } catch (err) { toast(err.message, true); }
+        renderPage();
+        break;
+      case 'att-edit': openAttEdit(el.dataset.email, el.dataset.date); break;
+      case 'att-csv': {
+        const m = ui('attendance').month;
+        const days = Number(monthEnd(m).slice(8));
+        const head = ['Member'].concat(Array.from({ length: days }, (_, k) => String(k + 1)), ['Present', 'Late', 'Leave', 'Absent']);
+        const lines = [head].concat(S.attGrid || []).map((r) => r.map((x) => '"' + String(x).replace(/"/g, '""') + '"').join(','));
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv' }));
+        a.download = 'Attendance_' + m + '.csv';
+        a.click();
+        break;
+      }
+      case 'att-net': {
+        try {
+          const ips = await publicIps(true);
+          const ta = $('#att-form [name=ipPrefixes]');
+          const add = ips.list.map(netPrefix).filter((x) => !ta.value.split('\n').map((y) => y.trim()).includes(x));
+          ta.value = ta.value.trim() + (add.length ? (ta.value.trim() ? '\n' : '') + add.join('\n') : '');
+          toast(add.length ? 'Added ' + add.join(', ') + ' — press Save' : 'This network is already in the list');
+        } catch (err) { toast(err.message, true); }
+        break;
+      }
+      case 'att-here':
+        try { const g = await getGeo(); $('#att-form [name=lat]').value = g.latitude.toFixed(6); $('#att-form [name=lng]').value = g.longitude.toFixed(6); toast('Location filled — press Save'); } catch (err) { toast(err.message, true); }
+        break;
       case 'member-add': openMember(); break;
       case 'member-edit': openMember(S.users.find((u) => u.id === el.dataset.id)); break;
       case 'member-reset': openReset(S.users.find((u) => u.id === el.dataset.id)); break;
@@ -1819,11 +2507,24 @@
     if (el.type === 'search' && e.type === 'change') return;
     renderPage();
   }
-  document.addEventListener('input', (e) => { if (e.target.matches('input[type=search][data-filter]')) onFilter(e); });
+  document.addEventListener('input', (e) => {
+    if (e.target.matches('input[type=search][data-filter]')) onFilter(e);
+    if (e.target.matches('[data-ep]')) estOnInput(e.target);
+  });
+  document.addEventListener('change', async (e) => {
+    if (!e.target.matches('[data-act-change=est-status]')) return;
+    try {
+      const r = await api('estimateStatus', { estimateNo: S.est.estimateNo, status: e.target.value });
+      S.estimates = r.estimates;
+      S.est.status = e.target.value;
+      toast('Status: ' + e.target.value);
+    } catch (err) { toast(err.message, true); }
+  });
+  window.addEventListener('beforeunload', (e) => { if (S.est && S.est.editing && S.est.dirty) { e.preventDefault(); e.returnValue = ''; } });
   document.addEventListener('change', (e) => { if (e.target.matches('[data-filter]') && e.target.type !== 'search') onFilter(e); });
   document.addEventListener('change', (e) => { if (e.target.matches('[data-act-change=sheet-tab]')) { ui('sheet').q = ''; loadSheetTab(e.target.value); } });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#modal-root').innerHTML) closeModal(); });
-  window.addEventListener('hashchange', () => { closeModal(); renderPage(); window.scrollTo(0, 0); });
+  window.addEventListener('hashchange', () => { closeModal(); S.estError = null; renderPage(); window.scrollTo(0, 0); });
 
   // ---------------------------------------------------------------------------
   // Boot
@@ -1844,6 +2545,7 @@
       clearSession();
     }
     render();
+    if (S.user && !S.user.mustChange) autoAttendance();
   }
 
   const savedTheme = store.get('am_theme');
@@ -1861,7 +2563,12 @@
       ['Saban Jha', 'IT Manager', 'it@urbaneliving.in', 'Admin'],
     ];
     const DEFAULTS = {
-      company: { name: 'Urbane Living', perKmRate: 3 },
+      company: { name: 'Urbane Living', perKmRate: 3, website: 'urbaneliving.in', gstNo: '09AAJFU0647A1ZC', address: 'G-12, Express Green Plaza, Sector-1, Vaishali, Ghaziabad', serviceArea: 'Gurugram, Noida, Delhi, Ghaziabad', logoUrl: '', bankName: '', bankAccount: '', bankIfsc: '', estimatePrefix: 'RFIUL', estimateValidDays: 14 },
+      attendance: { ipPrefixes: ['2406:b400:71:93ee'], startTime: '10:00', autoMark: false, geo: { enabled: false, lat: '', lng: '', radius: 200 } },
+      estimateCounter: 226,
+      estimateTemplate: null,
+      imports: [],
+      hiddenTabs: [],
       lists: {
         projectTypes: ['Residential', 'Commercial', 'Office', 'Showroom', 'Restaurant', 'Other'],
         clientStatus: ['Ongoing', 'Completed', 'On Hold', 'Cancelled'],
@@ -1954,7 +2661,46 @@
       const log = (action, table, id) => { db.audit.unshift({ timestamp: new Date().toISOString(), user: user.email, action: action, table: table, recordId: id, details: '' }); };
       switch (req.action) {
         case 'logout': delete db.sessions[req.token]; save(); return { ok: true };
-        case 'bootstrap': return { ok: true, user: pub(user), settings: db.settings, data: JSON.parse(JSON.stringify(db.tables)), users: db.users.map(pub) };
+        case 'bootstrap': {
+          db.settings = Object.assign(JSON.parse(JSON.stringify(DEFAULTS)), db.settings);
+          db.estimates = db.estimates || [];
+          db.attendance = db.attendance || [];
+          const est = db.estimates.map((r) => { const o = Object.assign({}, r); delete o.data; delete o.logs; return o; });
+          return { ok: true, user: pub(user), settings: db.settings, data: JSON.parse(JSON.stringify(db.tables)), users: db.users.map(pub), estimates: est, attendanceToday: db.attendance.find((r) => r.email === user.email && r.date === today()) || null };
+        }
+        case 'estimateGet': { const r = (db.estimates || []).find((x) => x.id === req.id); return r ? { ok: true, record: JSON.parse(JSON.stringify(r)) } : fail('Estimate not found'); }
+        case 'estimateSave': {
+          db.estimates = db.estimates || [];
+          const rec = req.record;
+          const now = new Date().toISOString();
+          const tot = rec.data.sections.reduce((a, x) => a + x.items.reduce((b, i) => b + (parseFloat(i.amount) || 0), 0), 0);
+          let no = rec.estimateNo;
+          let version = 1;
+          if (req.mode === 'new') { db.settings.estimateCounter = (db.settings.estimateCounter || 226) + 1; no = 'RFIUL' + today().slice(5, 7) + today().slice(8) + db.settings.estimateCounter; }
+          else version = Math.max.apply(null, db.estimates.filter((x) => x.estimateNo === no).map((x) => x.version)) + 1;
+          const first = db.estimates.find((x) => x.estimateNo === no && x.version === 1);
+          const o = { id: uid('ES'), estimateNo: no, version: version, isOriginal: version === 1, estimateDate: rec.estimateDate, clientName: rec.client.name, clientPhone: rec.client.phone || '', clientAddress: rec.client.address || '', grandTotal: tot, status: 'Draft', clientId: '', data: rec.data, logs: [{ time: now, user: user.email, action: version === 1 ? 'Saved original ' + no : 'Updated to V' + version }].concat((rec.newLogs || []).map((a) => ({ time: now, user: user.email, action: a }))), createdBy: first ? first.createdBy : user.email, updatedBy: user.email, updatedAt: now };
+          db.estimates.push(o); save();
+          return { ok: true, record: JSON.parse(JSON.stringify(o)), estimates: db.estimates.map((r) => { const x = Object.assign({}, r); delete x.data; delete x.logs; return x; }) };
+        }
+        case 'estimateDelete': db.estimates = db.estimates.filter((x) => x.id !== req.id); save(); return { ok: true, estimates: db.estimates.map((r) => { const x = Object.assign({}, r); delete x.data; delete x.logs; return x; }) };
+        case 'estimateStatus': db.estimates.filter((x) => x.estimateNo === req.estimateNo).forEach((x) => { x.status = req.status; }); save(); return { ok: true, estimates: db.estimates.map((r) => { const x = Object.assign({}, r); delete x.data; delete x.logs; return x; }) };
+        case 'attendanceMark': {
+          db.attendance = db.attendance || [];
+          const t = new Date().toTimeString().slice(0, 5);
+          let r = db.attendance.find((x) => x.email === user.email && x.date === today());
+          if (!r) { r = { id: uid('AT'), date: today(), email: user.email, name: user.name, checkIn: t, checkOut: '', ip: req.ip, method: 'Demo', status: t > '10:00' ? 'Late' : 'Present', notes: '' }; db.attendance.push(r); save(); return { ok: true, record: r, action: 'in' }; }
+          if (req.kind === 'in') return { ok: true, record: r, action: 'already' };
+          r.checkOut = t; save(); return { ok: true, record: r, action: 'out' };
+        }
+        case 'attendanceList': return { ok: true, rows: (db.attendance || []).filter((x) => x.date >= req.from && x.date <= req.to && (['Admin', 'Accountant'].includes(user.role) || x.email === user.email)) };
+        case 'attendanceSave': {
+          const t = db.users.find((u) => u.email === req.record.email);
+          let r = db.attendance.find((x) => x.email === t.email && x.date === req.record.date);
+          if (!r) { r = { id: uid('AT'), date: req.record.date, email: t.email, name: t.name, ip: '', method: 'Manual (Admin)' }; db.attendance.push(r); }
+          Object.assign(r, { status: req.record.status, checkIn: req.record.checkIn, checkOut: req.record.checkOut, notes: req.record.notes }); save();
+          return { ok: true };
+        }
         case 'changePassword':
           if (req.oldPassword !== user.password) return fail('Current password is wrong');
           user.password = req.newPassword; user.mustChange = false; save(); return { ok: true };
@@ -2012,7 +2758,8 @@
         }
         case 'saveSettings':
           if (!write) return fail('You do not have permission for this action');
-          if (req.settings.company) db.settings.company = Object.assign(db.settings.company, { name: req.settings.company.name, perKmRate: Number(req.settings.company.perKmRate) || 0 });
+          if (req.settings.company) db.settings.company = Object.assign(db.settings.company, req.settings.company);
+          ['attendance', 'estimateCounter', 'estimateTemplate'].forEach((k) => { if (k in req.settings) db.settings[k] = req.settings[k]; });
           Object.assign(db.settings.lists, req.settings.lists || {});
           if ('employeeSource' in req.settings) db.settings.employeeSource = req.settings.employeeSource;
           log('update', 'Settings', ''); save();
