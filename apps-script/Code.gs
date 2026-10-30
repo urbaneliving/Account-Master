@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-10-30.2';
+const API_VERSION = '2026-10-30.3';
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
 const SESSION_DAYS = 7;
 const MAX_LOGIN_FAILS = 5;
@@ -146,6 +146,7 @@ function route_(req) {
     case 'resetPassword': return resetPassword_(user, req.id, req.password);
     case 'saveSettings': return saveSettings_(user, req.settings);
     case 'audit': return { rows: auditRows_(user, req.limit) };
+    case 'sheetTabs': return sheetTabs_(req.name);
     default: throw err_('Unknown action: ' + req.action);
   }
 }
@@ -506,6 +507,22 @@ function saveSettings_(user, settings) {
   }
   audit_(user, 'update', 'Settings', '', entries.map(function (e) { return e[0]; }).join(', '));
   return { settings: readSettings_() };
+}
+
+// ---------------------------------------------------------------------------
+// Other tabs in the spreadsheet (read-only view of data the app doesn't manage)
+// ---------------------------------------------------------------------------
+function sheetTabs_(name) {
+  const ss = ss_();
+  const tabs = ss.getSheets().map(function (sh) { return sh.getName(); })
+    .filter(function (n) { return !(n in SCHEMA); });
+  if (!name || tabs.indexOf(name) < 0) name = tabs[0] || '';
+  if (!name) return { tabs: tabs, name: '', rows: [] };
+  const sh = ss.getSheetByName(name);
+  const lastRow = Math.min(sh.getLastRow(), 5000);
+  const lastCol = Math.min(sh.getLastColumn(), 60);
+  const rows = lastRow && lastCol ? sh.getRange(1, 1, lastRow, lastCol).getDisplayValues() : [];
+  return { tabs: tabs, name: name, rows: rows };
 }
 
 // ---------------------------------------------------------------------------

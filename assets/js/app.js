@@ -83,6 +83,7 @@
     salary: '<circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6s7 2 7 6"/><path d="M17 11h5M19.5 8.5v5"/>',
     expenses: '<path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/>',
+    sheet: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
     trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>',
@@ -402,6 +403,7 @@
     S.token = null;
     S.user = null;
     S.data = {};
+    S.sheet = null;
     store.del('am_token');
   }
 
@@ -760,6 +762,7 @@
     ['office', 'Office expenses', 'office'],
     ['salary', 'Employees & salary', 'salary'],
     ['expenses', 'Employee expenses', 'expenses'],
+    ['sheet', 'Sheet data', 'sheet'],
     ['settings', 'Settings', 'settings'],
   ];
 
@@ -790,7 +793,7 @@
 
     const r = route();
     $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.nav === r.page || (r.page === 'employees' && a.dataset.nav === 'salary')));
-    const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: viewExpenses, settings: viewSettings };
+    const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: viewExpenses, sheet: viewSheet, settings: viewSettings };
     const fn = views[r.page] || viewDashboard;
     try {
       page.innerHTML = fn(r.id);
@@ -1255,6 +1258,83 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Sheet data — read-only view of the spreadsheet's other tabs
+  // ---------------------------------------------------------------------------
+  const cellNum = (v) => {
+    const t = String(v).replace(/[₹,\s]/g, '').replace(/^Rs\.?/i, '');
+    return t !== '' && /^-?\d+(\.\d+)?$/.test(t) ? Number(t) : null;
+  };
+
+  function loadSheetTab(name) {
+    S.sheet = Object.assign(S.sheet || {}, { loading: true, error: '' });
+    renderPage();
+    api('sheetTabs', { name: name || '' }).then((r) => {
+      S.sheet = { tabs: r.tabs, name: r.name, rows: r.rows, loading: false, error: '' };
+      ui('sheet').q = '';
+      renderPage();
+    }).catch((e) => {
+      S.sheet = Object.assign(S.sheet || {}, { loading: false, error: e.message });
+      renderPage();
+    });
+  }
+
+  function viewSheet() {
+    const sh = S.sheet;
+    let h = pageHead('Sheet data', 'Other tabs of the Google Sheet, shown as they are (read only)',
+      '<button class="btn" data-act="sheet-reload">' + icon('refresh') + 'Refresh</button>');
+    if (!sh || (sh.loading && !sh.tabs)) {
+      return h + '<div class="loading" style="min-height:200px"><div class="spinner"></div><div>Reading the sheet…</div></div>';
+    }
+    if (sh.error) {
+      const old = /Unknown action/.test(sh.error);
+      return h + '<div class="card"><div class="card-body"><div class="form-error">' + esc(sh.error) + '</div>' +
+        (old ? '<p class="muted">The Apps Script code is older than this page. Paste the latest <code>Code.gs</code> and deploy a <b>New version</b>.</p>' : '') + '</div></div>';
+    }
+    if (!sh.tabs.length) return h + '<div class="card"><div class="empty">The sheet has no other tabs besides the app’s own tabs.</div></div>';
+
+    h += '<div class="tabs">' + sh.tabs.map((t) => '<button data-act="sheet-tab" data-id="' + esc(t) + '" class="' + (t === sh.name ? 'active' : '') + '">' + esc(t) + '</button>').join('') + '</div>';
+    if (sh.loading) return h + '<div class="loading" style="min-height:200px"><div class="spinner"></div></div>';
+
+    // Drop empty rows/columns; the first row with 2+ filled cells is the header.
+    const filled = sh.rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+    const width = filled.reduce((m, r) => Math.max(m, r.length), 0);
+    const usedCols = [];
+    for (let j = 0; j < width; j++) if (filled.some((r) => String(r[j] || '').trim() !== '')) usedCols.push(j);
+    let hi = filled.findIndex((r) => usedCols.filter((j) => String(r[j] || '').trim() !== '').length >= Math.min(2, usedCols.length));
+    if (hi < 0) hi = 0;
+    const title = filled.slice(0, hi).map((r) => r.filter(Boolean).join(' ')).join(' · ');
+    const header = filled[hi] || [];
+    const body = filled.slice(hi + 1).map((r, i) => {
+      const o = { id: String(i) };
+      usedCols.forEach((j) => { o['c' + j] = r[j] === undefined ? '' : r[j]; });
+      return o;
+    });
+    const cols = usedCols.map((j, n) => {
+      const k = 'c' + j;
+      const vals = body.map((r) => r[k]).filter((v) => String(v).trim() !== '');
+      const numeric = vals.length > 0 && vals.filter((v) => cellNum(v) !== null).length / vals.length >= 0.8;
+      const label = String(header[j] || '').trim() || 'Column ' + (n + 1);
+      const isPhone = /phone|mobile|contact|number/i.test(label);
+      const money = numeric && !isPhone && !/id|code|no\.?$|qty|quantity|km/i.test(label);
+      return {
+        k: k, l: label, r: numeric && !isPhone, primary: n === 0,
+        v: (r) => (numeric && !isPhone ? (cellNum(r[k]) || 0) : r[k]),
+        f: (r) => esc(r[k]),
+        total: money && vals.length > 1,
+        csv: (r) => r[k],
+      };
+    });
+    const list_ = body.filter((r) => matchQ('sheet', ...usedCols.map((j) => r['c' + j])));
+    h += (title ? '<p class="muted" style="margin-top:0">' + esc(title) + '</p>' : '');
+    h += '<div class="filters">' + searchFilter('sheet', 'Search in ' + sh.name + '…') + '<span class="muted small">' + list_.length + ' of ' + body.length + ' rows</span>' + csvBtn('sheet-tab') + '</div>';
+    h += '<div class="card">' + dataTable('sheet-tab', cols, list_, { name: sh.name, empty: body.length ? 'No rows match the search' : 'This tab is empty' }) + '</div>';
+    return h;
+  }
+  viewSheet.after = function () {
+    if (!S.sheet) loadSheetTab('');
+  };
+
+  // ---------------------------------------------------------------------------
   // Settings
   // ---------------------------------------------------------------------------
   const LIST_LABELS = {
@@ -1438,6 +1518,8 @@
       case 'open-emp': if (!e.target.closest('button, a')) location.hash = '#/employees/' + encodeURIComponent(el.dataset.id); break;
       case 'emp-month': ui('employee').month = el.dataset.id; renderPage(); window.scrollTo(0, 0); break;
       case 'csv': exportCsv(el.dataset.id); break;
+      case 'sheet-tab': loadSheetTab(el.dataset.id); break;
+      case 'sheet-reload': loadSheetTab(S.sheet && S.sheet.name); break;
       case 'print': window.print(); break;
       case 'member-add': openMember(); break;
       case 'member-edit': openMember(S.users.find((u) => u.id === el.dataset.id)); break;
@@ -1650,6 +1732,11 @@
           log('update', 'Settings', ''); save();
           return { ok: true, settings: db.settings };
         case 'audit': return { ok: true, rows: db.audit.slice(0, req.limit || 300) };
+        case 'sheetTabs': return {
+          ok: true, tabs: ['Old Records (Demo)'], name: 'Old Records (Demo)',
+          rows: [['URBANE LIVING — OLD ACCOUNT RECORDS', '', '', ''], ['Date', 'Client', 'Particulars', 'Amount'],
+            ['05-09-2026', 'Rajesh Sharma', 'Advance received', '₹50,000'], ['12-09-2026', 'Café Brew House', 'Material purchase', '₹18,400'], ['', '', '', ''], ['20-09-2026', 'Neha Verma', 'Final payment', '₹45,000']],
+        };
         default: return fail('Unknown action');
       }
     }
