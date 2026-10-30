@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-10-30.3';
+const API_VERSION = '2026-10-31.1';
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
 const SESSION_DAYS = 7;
 const MAX_LOGIN_FAILS = 5;
@@ -91,6 +91,7 @@ const CHILDREN = {
 
 const DEFAULT_SETTINGS = {
   company: { name: 'Urbane Living', perKmRate: 3 },
+  employeeSource: null,
   lists: {
     projectTypes: ['Residential', 'Commercial', 'Office', 'Showroom', 'Restaurant', 'Other'],
     clientStatus: ['Ongoing', 'Completed', 'On Hold', 'Cancelled'],
@@ -147,6 +148,10 @@ function route_(req) {
     case 'saveSettings': return saveSettings_(user, req.settings);
     case 'audit': return { rows: auditRows_(user, req.limit) };
     case 'sheetTabs': return sheetTabs_(req.name);
+    case 'sheetRowSave': return sheetRowSave_(user, req.name, req.row, req.values, req.original);
+    case 'sheetRowDelete': return sheetRowDelete_(user, req.name, req.row, req.original);
+    case 'sheetAddColumn': return sheetAddColumn_(user, req.name, req.headerRow, req.label);
+    case 'importEmployees': return importEmployees_(user, req.records, req.source);
     default: throw err_('Unknown action: ' + req.action);
   }
 }
@@ -467,6 +472,7 @@ function readSettings_() {
     try {
       const v = JSON.parse(r.value);
       if (r.key === 'company') s.company = Object.assign(s.company, v);
+      else if (r.key === 'employeeSource') s.employeeSource = v;
       else if (r.key.indexOf('list.') === 0 && Array.isArray(v)) s.lists[r.key.slice(5)] = v;
     } catch (e) { /* ignore malformed values */ }
   });
@@ -482,6 +488,7 @@ function saveSettings_(user, settings) {
     const c = settings.company;
     entries.push(['company', { name: String(c.name || '').trim() || 'Urbane Living', perKmRate: Number(c.perKmRate) || 0 }]);
   }
+  if ('employeeSource' in settings) entries.push(['employeeSource', cleanSource_(settings.employeeSource, null)]);
   Object.keys(settings.lists || {}).forEach(function (k) {
     if (!(k in DEFAULT_SETTINGS.lists)) return;
     const list = (settings.lists[k] || []).map(function (x) { return String(x).trim(); }).filter(String);
@@ -489,6 +496,12 @@ function saveSettings_(user, settings) {
     entries.push(['list.' + k, list]);
   });
 
+  writeSettings_(user, entries);
+  audit_(user, 'update', 'Settings', '', entries.map(function (e) { return e[0]; }).join(', '));
+  return { settings: readSettings_() };
+}
+
+function writeSettings_(user, entries) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -505,8 +518,16 @@ function saveSettings_(user, settings) {
   } finally {
     lock.releaseLock();
   }
-  audit_(user, 'update', 'Settings', '', entries.map(function (e) { return e[0]; }).join(', '));
-  return { settings: readSettings_() };
+}
+
+const EMPLOYEE_SOURCE_FIELDS = ['name', 'designation', 'phone', 'email', 'joiningDate', 'monthlySalary', 'perKmRate', 'bankDetails', 'status'];
+
+function cleanSource_(src, lastSync) {
+  if (!src || !src.tab) return null;
+  const map = {};
+  EMPLOYEE_SOURCE_FIELDS.forEach(function (f) { if (src.map && src.map[f]) map[f] = String(src.map[f]); });
+  if (!map.name) throw err_('Choose which column has the employee name');
+  return { tab: String(src.tab), map: map, lastSync: lastSync || src.lastSync || '', lastSyncBy: src.lastSyncBy || '' };
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +544,148 @@ function sheetTabs_(name) {
   const lastCol = Math.min(sh.getLastColumn(), 60);
   const rows = lastRow && lastCol ? sh.getRange(1, 1, lastRow, lastCol).getDisplayValues() : [];
   return { tabs: tabs, name: name, rows: rows };
+}
+
+function editableTab_(name) {
+  name = String(name || '');
+  if (!name || name in SCHEMA) throw err_('This tab cannot be edited here');
+  const sh = ss_().getSheetByName(name);
+  if (!sh) throw err_('Tab "' + name + '" not found');
+  return sh;
+}
+
+function cleanValues_(values) {
+  return (values || []).map(function (v) { return v === null || v === undefined ? '' : String(v).slice(0, 5000); });
+}
+
+// Refuse to touch a row that changed since the user loaded it (rows can shift).
+function checkRow_(sh, row, original) {
+  original = cleanValues_(original);
+  if (!original.length) throw err_('Missing original row values');
+  const cur = sh.getRange(row, 1, 1, original.length).getDisplayValues()[0];
+  if (cur.join('\u0001') !== original.join('\u0001')) {
+    throw err_('This row was changed in the sheet meanwhile. Press Refresh and try again.');
+  }
+}
+
+function sheetRowSave_(user, name, row, values, original) {
+  needRole_(user, WRITE_ROLES);
+  const sh = editableTab_(name);
+  values = cleanValues_(values);
+  if (!values.length || !values.some(String)) throw err_('Row is empty');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    row = Number(row) || 0;
+    const isNew = !row;
+    if (isNew) {
+      row = sh.getLastRow() + 1;
+      if (row > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), 50);
+    } else {
+      checkRow_(sh, row, original);
+    }
+    sh.getRange(row, 1, 1, values.length).setValues([values]);
+    audit_(user, isNew ? 'create' : 'update', 'Sheet: ' + name, 'row ' + row, values.filter(String).slice(0, 6).join(' | '));
+    return { row: row };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function sheetRowDelete_(user, name, row, original) {
+  needRole_(user, WRITE_ROLES);
+  const sh = editableTab_(name);
+  row = Number(row) || 0;
+  if (row < 1) throw err_('Invalid row');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    checkRow_(sh, row, original);
+    sh.deleteRow(row);
+    audit_(user, 'delete', 'Sheet: ' + name, 'row ' + row, cleanValues_(original).filter(String).slice(0, 6).join(' | '));
+    return {};
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function sheetAddColumn_(user, name, headerRow, label) {
+  needRole_(user, WRITE_ROLES);
+  const sh = editableTab_(name);
+  label = String(label || '').trim();
+  if (!label) throw err_('Column name is required');
+  headerRow = Math.max(1, Number(headerRow) || 1);
+  const col = sh.getLastColumn() + 1;
+  sh.getRange(headerRow, col).setValue(label);
+  audit_(user, 'update', 'Sheet: ' + name, 'column ' + col, 'Added column ' + label);
+  return {};
+}
+
+// Create/update employees from rows of a linked sheet tab. Matches by email,
+// then mobile, then name. Blank cells never overwrite existing values.
+function importEmployees_(user, records, source) {
+  needRole_(user, WRITE_ROLES);
+  records = (records || []).map(function (r) { return sanitize_('Employees', r || {}); }).filter(function (r) { return r.name; });
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let created = 0;
+  let updated = 0;
+  try {
+    const sh = sheet_('Employees');
+    const values = sh.getDataRange().getValues();
+    const headers = values[0].map(String);
+    const types = types_('Employees');
+    const existing = values.slice(1).map(function (row, i) { return { i: i + 1, o: rowToObj_(headers, row, types) }; })
+      .filter(function (x) { return x.o.id; });
+    const digits = function (v) { return String(v || '').replace(/\D/g, '').slice(-10); };
+    const now = new Date().toISOString();
+    let next = values.length + 1;
+    const codeVals = values.slice();
+
+    records.forEach(function (r) {
+      const email = String(r.email || '').toLowerCase();
+      const match = existing.filter(function (x) {
+        return (email && String(x.o.email).toLowerCase() === email) ||
+          (digits(r.phone) && digits(x.o.phone) === digits(r.phone)) ||
+          String(x.o.name).trim().toLowerCase() === String(r.name).trim().toLowerCase();
+      })[0];
+      if (match) {
+        let changed = false;
+        Object.keys(r).forEach(function (k) {
+          if (r[k] !== '' && String(r[k]) !== String(match.o[k])) { match.o[k] = r[k]; changed = true; }
+        });
+        if (!changed) return;
+        match.o.updatedBy = user.email;
+        match.o.updatedAt = now;
+        writeRow_(sh, match.i + 1, headers, types, headers.map(function (k) { return toCell_(match.o[k], types[k]); }));
+        updated++;
+      } else {
+        const o = Object.assign({ status: 'Active', monthlySalary: 0 }, r);
+        Object.keys(o).forEach(function (k) { if (o[k] === '') delete o[k]; });
+        if (!o.status) o.status = 'Active';
+        o.id = newId_('EM');
+        o.empCode = nextCode_(codeVals, headers, 'empCode', 'UL-E-');
+        o.createdBy = o.updatedBy = user.email;
+        o.createdAt = o.updatedAt = now;
+        const row = headers.map(function (k) { return toCell_(o[k], types[k]); });
+        writeRow_(sh, next++, headers, types, row);
+        codeVals.push(row);
+        existing.push({ i: next - 2, o: o });
+        created++;
+      }
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  const settings = readSettings_();
+  if (settings.employeeSource && source === settings.employeeSource.tab) {
+    const src = settings.employeeSource;
+    src.lastSync = new Date().toISOString();
+    src.lastSyncBy = user.email;
+    writeSettings_(user, [['employeeSource', src]]);
+  }
+  if (created || updated) audit_(user, 'sync', 'Employees', '', 'From sheet "' + source + '": ' + created + ' added, ' + updated + ' updated');
+  return { created: created, updated: updated, records: readTable_('Employees'), settings: readSettings_() };
 }
 
 // ---------------------------------------------------------------------------

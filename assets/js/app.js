@@ -97,7 +97,7 @@
     pay: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>',
     key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2M16 7l3 3M19 4l2 2"/>',
   };
-  const icon = (n) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[n] || '') + '</svg>';
+  const icon = (n) => '<svg width="16" height="16" style="vertical-align:-3px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[n] || '') + '</svg>';
 
   function toast(msg, isError) {
     const el = document.createElement('div');
@@ -404,6 +404,7 @@
     S.user = null;
     S.data = {};
     S.sheet = null;
+    S.autoSynced = false;
     store.del('am_token');
   }
 
@@ -1133,6 +1134,15 @@
       }) + '</div>';
     } else if (st.tab === 'employees') {
       const list_ = emps.filter((e) => (!st.status || e.status === st.status) && matchQ('salary', e.name, e.empCode, e.designation, e.phone));
+      const src = S.settings.employeeSource;
+      h += '<div class="card" style="margin-bottom:12px"><div class="card-body" style="display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap">' +
+        (src && src.tab
+          ? '<div>' + icon('sheet') + ' Linked to sheet tab <a href="#/sheet" data-act="open-sheet-tab" data-id="' + esc(src.tab) + '"><b>' + esc(src.tab) + '</b></a>' +
+            '<div class="small muted">' + (src.lastSync ? 'Last synced ' + esc(fmtStamp(src.lastSync)) + ' by ' + esc(userName(src.lastSyncBy)) : 'Not synced yet') + ' · new rows in the sheet become employees</div></div>' +
+            (canWrite() ? '<div class="page-actions"><button class="btn" data-act="emp-link">Change link</button><button class="btn primary" data-act="emp-sync">' + icon('refresh') + 'Sync now</button></div>' : '')
+          : '<div><b>Keep employees in a Google Sheet tab?</b><div class="small muted">Link a tab (e.g. your staff list) and its rows become employees here, kept in sync.</div></div>' +
+            (canWrite() ? '<button class="btn" data-act="emp-link">' + icon('sheet') + 'Link sheet tab</button>' : '')) +
+        '</div></div>';
       h += '<div class="filters">' + searchFilter('salary', 'Search employees…') + selectFilter('salary', 'status', 'All', ['Active', 'Inactive']) + csvBtn('employees') + '</div>';
       h += '<div class="card">' + dataTable('employees', [
         { k: 'name', l: 'Employee', primary: true, f: (e) => '<b>' + esc(e.name) + '</b><div class="cell-sub">' + esc([e.empCode, e.designation].filter(Boolean).join(' · ')) + '</div>' },
@@ -1165,6 +1175,14 @@
     }
     return h;
   }
+
+  viewSalary.after = function () {
+    const src = S.settings.employeeSource;
+    if (src && src.tab && canWrite() && !S.autoSynced) {
+      S.autoSynced = true;
+      syncEmployees(true).catch((e) => toast(e.message, true));
+    }
+  };
 
   function viewEmployee(id) {
     const e = byId('Employees', id);
@@ -1265,12 +1283,33 @@
     return t !== '' && /^-?\d+(\.\d+)?$/.test(t) ? Number(t) : null;
   };
 
-  function loadSheetTab(name) {
+  const colLetter = (j) => { let n = j + 1; let out = ''; while (n) { const m = (n - 1) % 26; out = String.fromCharCode(65 + m) + out; n = Math.floor((n - 1) / 26); } return out; };
+  const filledCell = (v) => String(v === undefined || v === null ? '' : v).trim() !== '';
+
+  // Turn raw tab values into header + records, remembering real sheet row numbers.
+  function parseTab(rows) {
+    const width = rows.reduce((m, r) => Math.max(m, r.length), 0);
+    const nonEmpty = (r) => r.some(filledCell);
+    const usedCols = [];
+    for (let j = 0; j < width; j++) if (rows.some((r) => filledCell(r[j]))) usedCols.push(j);
+    const hi = rows.findIndex((r) => nonEmpty(r) && usedCols.filter((j) => filledCell(r[j])).length >= Math.min(2, usedCols.length));
+    if (hi < 0) return { width: width, usedCols: [], headerRow: 0, header: [], title: '', records: [], label: () => '' };
+    const header = rows[hi];
+    const label = (j) => String(header[j] || '').trim() || 'Column ' + colLetter(j);
+    const records = [];
+    for (let i = hi + 1; i < rows.length; i++) if (nonEmpty(rows[i])) records.push({ id: String(i + 1), rowNum: i + 1, raw: rows[i] });
+    return {
+      width: width, usedCols: usedCols, headerRow: hi + 1, header: header, label: label, records: records,
+      title: rows.slice(0, hi).filter(nonEmpty).map((r) => r.filter(filledCell).join(' ')).join(' · '),
+    };
+  }
+
+  function loadSheetTab(name, after) {
     S.sheet = Object.assign(S.sheet || {}, { loading: true, error: '' });
     renderPage();
-    api('sheetTabs', { name: name || '' }).then((r) => {
+    return api('sheetTabs', { name: name || '' }).then((r) => {
       S.sheet = { tabs: r.tabs, name: r.name, rows: r.rows, loading: false, error: '' };
-      ui('sheet').q = '';
+      if (after) after();
       renderPage();
     }).catch((e) => {
       S.sheet = Object.assign(S.sheet || {}, { loading: false, error: e.message });
@@ -1278,61 +1317,226 @@
     });
   }
 
+  const isLinkedTab = (name) => S.settings && S.settings.employeeSource && S.settings.employeeSource.tab === name;
+
   function viewSheet() {
     const sh = S.sheet;
-    let h = pageHead('Sheet data', 'Other tabs of the Google Sheet, shown as they are (read only)',
+    let h = pageHead('Sheet data', 'All other tabs of the Google Sheet — view, add, edit and delete rows',
       '<button class="btn" data-act="sheet-reload">' + icon('refresh') + 'Refresh</button>');
     if (!sh || (sh.loading && !sh.tabs)) {
       return h + '<div class="loading" style="min-height:200px"><div class="spinner"></div><div>Reading the sheet…</div></div>';
     }
-    if (sh.error) {
+    if (sh.error && !sh.tabs) {
       const old = /Unknown action/.test(sh.error);
       return h + '<div class="card"><div class="card-body"><div class="form-error">' + esc(sh.error) + '</div>' +
         (old ? '<p class="muted">The Apps Script code is older than this page. Paste the latest <code>Code.gs</code> and deploy a <b>New version</b>.</p>' : '') + '</div></div>';
     }
-    if (!sh.tabs.length) return h + '<div class="card"><div class="empty">The sheet has no other tabs besides the app’s own tabs.</div></div>';
+    if (!sh.tabs.length) return h + '<div class="card"><div class="empty">The sheet has no other tabs besides the app’s own tabs. Add a tab in Google Sheets and press Refresh.</div></div>';
 
-    h += '<div class="tabs">' + sh.tabs.map((t) => '<button data-act="sheet-tab" data-id="' + esc(t) + '" class="' + (t === sh.name ? 'active' : '') + '">' + esc(t) + '</button>').join('') + '</div>';
+    h += '<div class="tabs">' + sh.tabs.map((t) => '<button data-act="sheet-tab" data-id="' + esc(t) + '" class="' + (t === sh.name ? 'active' : '') + '">' + esc(t) +
+      (isLinkedTab(t) ? ' <span class="badge accent">Employees</span>' : '') + '</button>').join('') + '</div>';
     if (sh.loading) return h + '<div class="loading" style="min-height:200px"><div class="spinner"></div></div>';
+    if (sh.error) h += '<div class="form-error" style="margin-bottom:12px">' + esc(sh.error) + '</div>';
 
-    // Drop empty rows/columns; the first row with 2+ filled cells is the header.
-    const filled = sh.rows.filter((r) => r.some((c) => String(c).trim() !== ''));
-    const width = filled.reduce((m, r) => Math.max(m, r.length), 0);
-    const usedCols = [];
-    for (let j = 0; j < width; j++) if (filled.some((r) => String(r[j] || '').trim() !== '')) usedCols.push(j);
-    let hi = filled.findIndex((r) => usedCols.filter((j) => String(r[j] || '').trim() !== '').length >= Math.min(2, usedCols.length));
-    if (hi < 0) hi = 0;
-    const title = filled.slice(0, hi).map((r) => r.filter(Boolean).join(' ')).join(' · ');
-    const header = filled[hi] || [];
-    const body = filled.slice(hi + 1).map((r, i) => {
-      const o = { id: String(i) };
-      usedCols.forEach((j) => { o['c' + j] = r[j] === undefined ? '' : r[j]; });
-      return o;
-    });
-    const cols = usedCols.map((j, n) => {
+    const t = parseTab(sh.rows);
+    if (isLinkedTab(sh.name)) {
+      h += '<div class="notice" style="margin:0 0 12px">This tab is linked to <a href="#/salary"><b>Employees &amp; salary</b></a>. Rows you add or edit here are synced to the employee list automatically.</div>';
+    }
+    if (!t.usedCols.length) {
+      return h + '<div class="card"><div class="empty">This tab is empty.' + (canWrite() ? ' Add columns to create the header row.<div style="margin-top:12px"><button class="btn primary" data-act="sheet-addcol">' + icon('plus') + 'Add column</button></div>' : '') + '</div></div>';
+    }
+    const cols = t.usedCols.map((j, n) => {
       const k = 'c' + j;
-      const vals = body.map((r) => r[k]).filter((v) => String(v).trim() !== '');
+      const vals = t.records.map((r) => r.raw[j]).filter(filledCell);
       const numeric = vals.length > 0 && vals.filter((v) => cellNum(v) !== null).length / vals.length >= 0.8;
-      const label = String(header[j] || '').trim() || 'Column ' + (n + 1);
-      const isPhone = /phone|mobile|contact|number/i.test(label);
-      const money = numeric && !isPhone && !/id|code|no\.?$|qty|quantity|km/i.test(label);
+      const lbl = t.label(j);
+      const isPhone = /phone|mobile|contact|number/i.test(lbl);
+      const money = numeric && !isPhone && !/id|code|no\.?$|qty|quantity|km/i.test(lbl);
       return {
-        k: k, l: label, r: numeric && !isPhone, primary: n === 0,
-        v: (r) => (numeric && !isPhone ? (cellNum(r[k]) || 0) : r[k]),
-        f: (r) => esc(r[k]),
+        k: k, l: lbl, r: numeric && !isPhone, primary: n === 0,
+        v: (r) => (numeric && !isPhone ? (cellNum(r.raw[j]) || 0) : String(r.raw[j] || '')),
+        f: (r) => esc(r.raw[j]),
         total: money && vals.length > 1,
-        csv: (r) => r[k],
+        csv: (r) => r.raw[j],
       };
     });
-    const list_ = body.filter((r) => matchQ('sheet', ...usedCols.map((j) => r['c' + j])));
-    h += (title ? '<p class="muted" style="margin-top:0">' + esc(title) + '</p>' : '');
-    h += '<div class="filters">' + searchFilter('sheet', 'Search in ' + sh.name + '…') + '<span class="muted small">' + list_.length + ' of ' + body.length + ' rows</span>' + csvBtn('sheet-tab') + '</div>';
-    h += '<div class="card">' + dataTable('sheet-tab', cols, list_, { name: sh.name, empty: body.length ? 'No rows match the search' : 'This tab is empty' }) + '</div>';
+    const list_ = t.records.filter((r) => matchQ('sheet', ...t.usedCols.map((j) => r.raw[j])));
+    h += (t.title ? '<p class="muted" style="margin-top:0">' + esc(t.title) + '</p>' : '');
+    h += '<div class="filters">' + searchFilter('sheet', 'Search in ' + sh.name + '…') + '<span class="muted small">' + list_.length + ' of ' + t.records.length + ' rows</span>' +
+      csvBtn('sheet-tab') + (canWrite() ? '<button class="btn sm" data-act="sheet-addcol">' + icon('plus') + 'Column</button><button class="btn primary" data-act="sheet-add">' + icon('plus') + 'Add row</button>' : '') + '</div>';
+    h += '<div class="card">' + dataTable('sheet-tab', cols, list_, {
+      name: sh.name,
+      empty: t.records.length ? 'No rows match the search' : 'No rows yet',
+      actions: (r) => '<button class="btn ghost sm icon" title="Edit" data-act="sheet-edit" data-id="' + r.rowNum + '">' + icon('edit') + '</button>' +
+        '<button class="btn ghost sm icon danger" title="Delete" data-act="sheet-del" data-id="' + r.rowNum + '">' + icon('trash') + '</button>',
+    }) + '</div>';
+    h += '<p class="small muted">Changes are written straight to the "' + esc(sh.name) + '" tab of the Google Sheet. Row numbers refer to the sheet.</p>';
     return h;
   }
   viewSheet.after = function () {
     if (!S.sheet) loadSheetTab('');
   };
+
+  function afterSheetChange() {
+    const name = S.sheet.name;
+    return loadSheetTab(name).then(() => {
+      if (isLinkedTab(name)) return syncEmployees(true).catch((e) => toast(e.message, true));
+    });
+  }
+
+  function openSheetRow(rowNum) {
+    const sh = S.sheet;
+    const t = parseTab(sh.rows);
+    const rec = rowNum ? t.records.find((r) => r.rowNum === rowNum) : null;
+    const width = Math.max(t.width, t.usedCols.length ? t.usedCols[t.usedCols.length - 1] + 1 : 0);
+    const raw = rec ? rec.raw : new Array(width).fill('');
+    const body = '<div class="form-grid">' + t.usedCols.map((j) => {
+      const long = String(raw[j] || '').length > 40;
+      return '<label class="field' + (long ? ' full' : '') + '">' + esc(t.label(j)) +
+        (long ? '<textarea class="input" name="c' + j + '" rows="2">' + esc(raw[j]) + '</textarea>' : '<input class="input" name="c' + j + '" value="' + esc(raw[j]) + '">') + '</label>';
+    }).join('') + '</div>' + (rec ? '<p class="small muted" style="margin-bottom:0">Sheet row ' + rec.rowNum + '</p>' : '');
+    openModal((rec ? 'Edit row · ' : 'Add row · ') + sh.name, body, {
+      submit: rec ? 'Save changes' : 'Add row',
+      onSubmit: async (form) => {
+        const values = raw.slice();
+        while (values.length < width) values.push('');
+        t.usedCols.forEach((j) => { values[j] = form.elements['c' + j].value.trim(); });
+        await api('sheetRowSave', { name: sh.name, row: rec ? rec.rowNum : 0, values: values, original: rec ? rec.raw : null });
+        toast(rec ? 'Row updated' : 'Row added');
+        await afterSheetChange();
+      },
+    });
+  }
+
+  async function deleteSheetRow(rowNum) {
+    const sh = S.sheet;
+    const rec = parseTab(sh.rows).records.find((r) => r.rowNum === rowNum);
+    if (!rec || !confirm('Delete row ' + rowNum + ' from "' + sh.name + '"? This cannot be undone.')) return;
+    try {
+      await api('sheetRowDelete', { name: sh.name, row: rowNum, original: rec.raw });
+      toast('Row deleted');
+      await afterSheetChange();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  function openAddColumn() {
+    const sh = S.sheet;
+    const t = parseTab(sh.rows);
+    openModal('Add column · ' + sh.name, '<label class="field">Column name<input class="input" name="label" placeholder="e.g. Salary"></label>', {
+      submit: 'Add column',
+      onSubmit: async (form) => {
+        await api('sheetAddColumn', { name: sh.name, headerRow: t.headerRow || 1, label: form.label.value });
+        toast('Column added');
+        await loadSheetTab(sh.name);
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Employees ← linked sheet tab
+  // ---------------------------------------------------------------------------
+  const EMP_FIELDS = [
+    ['name', 'Name', /name/i], ['designation', 'Designation', /designation|post|role|position/i], ['phone', 'Mobile', /mobile|phone|contact/i],
+    ['email', 'Email', /mail/i], ['monthlySalary', 'Monthly salary', /salary|ctc|pay/i], ['joiningDate', 'Joining date', /join|doj/i],
+    ['perKmRate', 'Rate per km', /km/i], ['bankDetails', 'Bank / UPI', /bank|upi|account|ifsc/i], ['status', 'Status (Active / Inactive)', /status|active/i],
+  ];
+
+  function toIsoDate(v) {
+    v = String(v || '').trim();
+    if (!v) return '';
+    let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) return m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
+    m = v.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/);
+    if (m) return (m[3].length === 2 ? '20' + m[3] : m[3]) + '-' + pad(m[2]) + '-' + pad(m[1]);
+    const d = new Date(v);
+    return isNaN(d) ? '' : isoDate(d);
+  }
+
+  async function syncEmployees(silent) {
+    const src = S.settings.employeeSource;
+    if (!src || !src.tab || !canWrite()) return;
+    const r = await api('sheetTabs', { name: src.tab });
+    if (r.name !== src.tab) throw new Error('Linked tab "' + src.tab + '" was not found in the sheet. Link another tab.');
+    const t = parseTab(r.rows);
+    const colOf = (lbl) => t.usedCols.find((j) => t.label(j) === lbl);
+    const records = t.records.map((rec) => {
+      const o = {};
+      Object.keys(src.map).forEach((f) => {
+        const j = colOf(src.map[f]);
+        if (j === undefined) return;
+        let v = String(rec.raw[j] === undefined ? '' : rec.raw[j]).trim();
+        if (f === 'monthlySalary' || f === 'perKmRate') { const n = cellNum(v); v = n === null ? '' : n; }
+        else if (f === 'joiningDate') v = toIsoDate(v);
+        else if (f === 'email') v = v.toLowerCase();
+        else if (f === 'status') v = v ? (/inactive|left|resign|^no$/i.test(v) ? 'Inactive' : 'Active') : '';
+        o[f] = v;
+      });
+      return o;
+    }).filter((o) => o.name);
+    const res = await api('importEmployees', { records: records, source: src.tab });
+    S.data.Employees = res.records;
+    S.settings = res.settings;
+    if (!silent || res.created || res.updated) toast('Synced from "' + src.tab + '": ' + res.created + ' added, ' + res.updated + ' updated');
+    renderPage();
+  }
+
+  async function openEmployeeLink() {
+    let tabsRes;
+    try { tabsRes = await api('sheetTabs', { name: (S.settings.employeeSource || {}).tab || '' }); } catch (e) { return toast(e.message, true); }
+    if (!tabsRes.tabs.length) return toast('The sheet has no other tabs to link. Add one in Google Sheets first.', true);
+    const cur = S.settings.employeeSource || {};
+    const cache = {};
+    cache[tabsRes.name] = tabsRes.rows;
+
+    const mappingHtml = (tab) => {
+      const t = parseTab(cache[tab] || []);
+      const labels = t.usedCols.map((j) => t.label(j));
+      const keep = cur.tab === tab ? cur.map || {} : {};
+      return '<p class="small muted" style="margin:0 0 12px">' + t.records.length + ' rows found in "' + esc(tab) + '". Choose which column holds each detail.</p><div class="form-grid">' +
+        EMP_FIELDS.map((f) => {
+          const guess = keep[f[0]] || labels.find((l) => f[2].test(l) && !(f[0] === 'name' && /mail/i.test(l))) || '';
+          return '<label class="field">' + esc(f[1]) + (f[0] === 'name' ? ' <span class="req">*</span>' : '') + '<select class="input" name="m_' + f[0] + '"><option value="">— not in sheet —</option>' +
+            labels.map((l) => '<option' + (l === guess ? ' selected' : '') + '>' + esc(l) + '</option>').join('') + '</select></label>';
+        }).join('') + '</div>';
+    };
+
+    const form = openModal('Link employees to a sheet tab', '<label class="field">Sheet tab<select class="input" name="tab">' +
+      tabsRes.tabs.map((t) => '<option' + (t === tabsRes.name ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select></label>' +
+      '<div id="emp-map" style="margin-top:16px">' + mappingHtml(tabsRes.name) + '</div>' +
+      '<p class="small muted">Employees are matched by email, then mobile, then name. Blank cells never erase details already in the app. Salary, advances and expenses stay in the app.</p>', {
+      wide: true,
+      submit: 'Link & sync',
+      foot: (cur.tab ? '<button type="button" class="btn danger" data-act="emp-unlink" style="margin-right:auto">Unlink</button>' : '') +
+        '<button type="button" class="btn" data-act="modal-close">Cancel</button><button type="submit" class="btn primary">Link &amp; sync</button>',
+      onSubmit: async (f) => {
+        const map = {};
+        EMP_FIELDS.forEach((x) => { if (f.elements['m_' + x[0]].value) map[x[0]] = f.elements['m_' + x[0]].value; });
+        if (!map.name) throw new Error('Choose which column has the employee name');
+        const r = await api('saveSettings', { settings: { employeeSource: { tab: f.tab.value, map: map } } });
+        S.settings = r.settings;
+        await syncEmployees(false);
+      },
+    });
+    form.tab.addEventListener('change', async () => {
+      const tab = form.tab.value;
+      $('#emp-map').innerHTML = '<div class="loading" style="min-height:120px"><div class="spinner"></div></div>';
+      try {
+        if (!cache[tab]) cache[tab] = (await api('sheetTabs', { name: tab })).rows;
+        $('#emp-map').innerHTML = mappingHtml(tab);
+      } catch (e) { $('#emp-map').innerHTML = '<div class="form-error">' + esc(e.message) + '</div>'; }
+    });
+  }
+
+  async function unlinkEmployees() {
+    if (!confirm('Stop syncing employees from the sheet? Employees already added stay in the app.')) return;
+    try {
+      const r = await api('saveSettings', { settings: { employeeSource: null } });
+      S.settings = r.settings;
+      closeModal();
+      toast('Sheet unlinked');
+      renderPage();
+    } catch (e) { toast(e.message, true); }
+  }
 
   // ---------------------------------------------------------------------------
   // Settings
@@ -1518,8 +1722,19 @@
       case 'open-emp': if (!e.target.closest('button, a')) location.hash = '#/employees/' + encodeURIComponent(el.dataset.id); break;
       case 'emp-month': ui('employee').month = el.dataset.id; renderPage(); window.scrollTo(0, 0); break;
       case 'csv': exportCsv(el.dataset.id); break;
-      case 'sheet-tab': loadSheetTab(el.dataset.id); break;
+      case 'open-sheet-tab': e.preventDefault(); location.hash = '#/sheet'; loadSheetTab(el.dataset.id); break;
+      case 'sheet-tab': ui('sheet').q = ''; loadSheetTab(el.dataset.id); break;
       case 'sheet-reload': loadSheetTab(S.sheet && S.sheet.name); break;
+      case 'sheet-add': openSheetRow(0); break;
+      case 'sheet-edit': openSheetRow(Number(el.dataset.id)); break;
+      case 'sheet-del': deleteSheetRow(Number(el.dataset.id)); break;
+      case 'sheet-addcol': openAddColumn(); break;
+      case 'emp-link': openEmployeeLink(); break;
+      case 'emp-unlink': unlinkEmployees(); break;
+      case 'emp-sync':
+        el.disabled = true;
+        syncEmployees(false).catch((err) => toast(err.message, true)).finally(() => { el.disabled = false; });
+        break;
       case 'print': window.print(); break;
       case 'member-add': openMember(); break;
       case 'member-edit': openMember(S.users.find((u) => u.id === el.dataset.id)); break;
@@ -1729,14 +1944,37 @@
           if (!write) return fail('You do not have permission for this action');
           if (req.settings.company) db.settings.company = Object.assign(db.settings.company, { name: req.settings.company.name, perKmRate: Number(req.settings.company.perKmRate) || 0 });
           Object.assign(db.settings.lists, req.settings.lists || {});
+          if ('employeeSource' in req.settings) db.settings.employeeSource = req.settings.employeeSource;
           log('update', 'Settings', ''); save();
           return { ok: true, settings: db.settings };
         case 'audit': return { ok: true, rows: db.audit.slice(0, req.limit || 300) };
-        case 'sheetTabs': return {
-          ok: true, tabs: ['Old Records (Demo)'], name: 'Old Records (Demo)',
-          rows: [['URBANE LIVING — OLD ACCOUNT RECORDS', '', '', ''], ['Date', 'Client', 'Particulars', 'Amount'],
-            ['05-09-2026', 'Rajesh Sharma', 'Advance received', '₹50,000'], ['12-09-2026', 'Café Brew House', 'Material purchase', '₹18,400'], ['', '', '', ''], ['20-09-2026', 'Neha Verma', 'Final payment', '₹45,000']],
-        };
+        case 'sheetTabs': {
+          if (!db.raw) db.raw = { 'Staff List (Demo)': [['URBANE LIVING — STAFF', '', '', '', ''], ['NAME', 'DESIGNATION', 'EMAIL ADDRESS', 'MOBILE NUMBER', 'SALARY'], ['Archit Kumar', 'Sales Executive', 'sales1@example.com', '9000000001', '18000'], ['Karun Kumar', 'Sales Executive', 'sales2@example.com', '9000000002', '18000'], ['Divya Singh', 'Design Manager', 'design1@example.com', '9000000003', '30000']], 'Old Records (Demo)': [['Date', 'Client', 'Particulars', 'Amount'], ['05-09-2026', 'Rajesh Sharma', 'Advance received', '₹50,000'], ['12-09-2026', 'Café Brew House', 'Material purchase', '₹18,400']] };
+          const tabs = Object.keys(db.raw);
+          const name = tabs.includes(req.name) ? req.name : tabs[0];
+          const w = db.raw[name].reduce((m, r) => Math.max(m, r.length), 0);
+          return { ok: true, tabs: tabs, name: name, rows: db.raw[name].map((r) => { const x = r.map(String); while (x.length < w) x.push(''); return x; }) };
+        }
+        case 'sheetRowSave': case 'sheetRowDelete': case 'sheetAddColumn': {
+          if (!write) return fail('You do not have permission for this action');
+          const t = db.raw[req.name];
+          if (req.action === 'sheetAddColumn') { const hr = t[req.headerRow - 1]; const w = t.reduce((m, r) => Math.max(m, r.length), 0); while (hr.length < w) hr.push(''); hr.push(req.label); save(); return { ok: true }; }
+          if (req.action === 'sheetRowDelete') t.splice(req.row - 1, 1);
+          else if (req.row) t[req.row - 1] = req.values; else t.push(req.values);
+          save(); return { ok: true };
+        }
+        case 'importEmployees': {
+          if (!write) return fail('You do not have permission for this action');
+          let created = 0; let updated = 0;
+          (req.records || []).forEach((r) => {
+            const e = db.tables.Employees.find((x) => (r.email && x.email === r.email) || x.name.toLowerCase() === r.name.toLowerCase());
+            if (e) { let ch = false; Object.keys(r).forEach((k) => { if (r[k] !== '' && String(r[k]) !== String(e[k])) { e[k] = r[k]; ch = true; } }); if (ch) updated++; }
+            else { const o = Object.assign({ status: 'Active', monthlySalary: 0 }, r); Object.keys(o).forEach((k) => { if (o[k] === '') delete o[k]; }); o.id = uid('EM'); o.empCode = 'UL-E-' + String(db.tables.Employees.length + 1).padStart(4, '0'); o.createdBy = user.email; o.createdAt = new Date().toISOString(); db.tables.Employees.push(o); created++; }
+          });
+          if (db.settings.employeeSource && db.settings.employeeSource.tab === req.source) Object.assign(db.settings.employeeSource, { lastSync: new Date().toISOString(), lastSyncBy: user.email });
+          save();
+          return { ok: true, created: created, updated: updated, records: JSON.parse(JSON.stringify(db.tables.Employees)), settings: db.settings };
+        }
         default: return fail('Unknown action');
       }
     }

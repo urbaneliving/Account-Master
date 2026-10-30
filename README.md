@@ -7,6 +7,8 @@ Accounts dashboard for Urbane Living. The accountant does all the work from this
 - **Employees & salary:** salary sheet = base salary + expenses − advances − deductions + bonus. You can record payments and keep a month-wise history.
 - **Employee expenses:** bike travel (km × ₹3 by default), fuel, food and so on. These are added to the salary of the month you choose.
 - **Login & members:** Admin, Accountant and Viewer roles. Admins add members from Settings.
+- **Sheet data:** shows every other tab of the Google Sheet. Accountants can add, edit and delete rows, and add columns, without opening the sheet.
+- **Employees from a sheet tab:** in Employees & salary → Employees, choose "Link sheet tab" and pick which column is the name, mobile, salary and so on. Rows in that tab become employees and stay in sync.
 - **Dashboard:** cash in vs cash out, client dues, pending salary, recent entries.
 - Fully responsive (phone, tablet, desktop), dark mode, CSV export and print.
 
