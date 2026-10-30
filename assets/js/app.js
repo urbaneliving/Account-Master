@@ -1333,8 +1333,10 @@
     }
     if (!sh.tabs.length) return h + '<div class="card"><div class="empty">The sheet has no other tabs besides the app’s own tabs. Add a tab in Google Sheets and press Refresh.</div></div>';
 
-    h += '<div class="tabs">' + sh.tabs.map((t) => '<button data-act="sheet-tab" data-id="' + esc(t) + '" class="' + (t === sh.name ? 'active' : '') + '">' + esc(t) +
-      (isLinkedTab(t) ? ' <span class="badge accent">Employees</span>' : '') + '</button>').join('') + '</div>';
+    h += '<div class="tab-pills" role="tablist">' + sh.tabs.map((t) => '<button role="tab" title="' + esc(t) + '" data-act="sheet-tab" data-id="' + esc(t) + '" class="' + (t === sh.name ? 'active' : '') + '">' + esc(t) +
+      (isLinkedTab(t) ? ' · Employees' : '') + '</button>').join('') + '</div>' +
+      '<label class="field tab-pick">Sheet tab (' + sh.tabs.length + ')<select class="input" data-act-change="sheet-tab">' +
+      sh.tabs.map((t) => '<option' + (t === sh.name ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select></label>';
     if (sh.loading) return h + '<div class="loading" style="min-height:200px"><div class="spinner"></div></div>';
     if (sh.error) h += '<div class="form-error" style="margin-bottom:12px">' + esc(sh.error) + '</div>';
 
@@ -1752,6 +1754,7 @@
   }
   document.addEventListener('input', (e) => { if (e.target.matches('input[type=search][data-filter]')) onFilter(e); });
   document.addEventListener('change', (e) => { if (e.target.matches('[data-filter]') && e.target.type !== 'search') onFilter(e); });
+  document.addEventListener('change', (e) => { if (e.target.matches('[data-act-change=sheet-tab]')) { ui('sheet').q = ''; loadSheetTab(e.target.value); } });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#modal-root').innerHTML) closeModal(); });
   window.addEventListener('hashchange', () => { closeModal(); renderPage(); window.scrollTo(0, 0); });
 
