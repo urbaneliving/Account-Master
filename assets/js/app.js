@@ -532,6 +532,12 @@
 
   const kpi = (label, value, foot, cls) => '<div class="kpi ' + (cls || '') + '"><div class="label">' + esc(label) + '</div><div class="value num">' + value + '</div>' + (foot ? '<div class="foot">' + foot + '</div>' : '') + '</div>';
 
+  // Access level shown together with the designation (e.g. "Design Manager · Staff").
+  function accessBadge(u) {
+    return '<span class="badge ' + ({ Admin: 'accent', Accountant: 'good' }[u.role] || '') + '" title="Access: ' + esc(u.role) + '">' +
+      (u.designation ? esc(u.designation) + ' · ' : '') + esc(u.role) + '</span>';
+  }
+
   function statusBadge(s) {
     const map = { Ongoing: 'accent', Completed: 'good', 'On Hold': 'warn', Cancelled: 'bad', Active: 'good', Inactive: '', Paid: 'good', Unpaid: 'warn', Pending: 'warn', Partial: 'warn', Present: 'good', Late: 'warn', 'Half Day': 'warn', Leave: '', Absent: 'bad', Holiday: '', Draft: '', Sent: 'accent', Approved: 'good', Rejected: 'bad', Admin: 'accent', Accountant: 'good', Staff: '' };
     return s ? '<span class="badge ' + (map[s] || '') + '">' + esc(s) + '</span>' : '';
@@ -2210,7 +2216,7 @@
     let h = '<div class="card" style="margin-bottom:16px"><div class="card-body" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">' +
       '<label title="Change photo" style="cursor:pointer;position:relative">' + avatar(u, 72) +
       '<input type="file" accept="image/*" id="photo-input" style="display:none"><span class="badge" style="position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);background:var(--surface)">Edit</span></label>' +
-      '<div style="flex:1;min-width:200px"><h1>' + esc(u.name) + '</h1><div class="detail-meta"><span>' + esc(u.designation || '') + '</span><span>' + esc(u.email) + '</span>' + statusBadge(u.role) + '</div>' +
+      '<div style="flex:1;min-width:200px"><h1>' + esc(u.name) + '</h1><div class="detail-meta"><span>' + esc(u.email) + '</span>' + accessBadge(u) + '</div>' +
       (u.photo ? '<button class="btn ghost sm" data-act="photo-remove" style="margin-top:6px;padding-left:0">Remove photo</button>' : '<div class="small muted" style="margin-top:6px">Click the circle to add your photo</div>') + '</div>' +
       '<div class="page-actions"><a class="btn" href="#/attendance">' + icon('attendance') + 'My attendance</a><a class="btn" href="#/estimates">' + icon('estimate') + 'My estimates</a></div></div></div>';
 
@@ -2552,7 +2558,7 @@
       const u = S.user;
       h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Profile</h2><a href="#/me">My account →</a></div><div class="card-body"><div class="breakdown">' +
         '<span class="muted">Name</span><span>' + esc(u.name) + '</span><span class="muted">Email</span><span>' + esc(u.email) + '</span>' +
-        '<span class="muted">Designation</span><span>' + esc(u.designation) + '</span><span class="muted">Access</span><span>' + statusBadge(u.role) + '</span></div>' +
+        '<span class="muted">Designation</span><span>' + esc(u.designation) + '</span><span class="muted">Access</span><span>' + accessBadge(u) + '</span></div>' +
         '<p class="small muted" style="margin-bottom:0">Admin (CEO, COO, VP Sales, IT): everything · Accountant: accounts + own estimates · Viewer: read-only accounts · Staff: own estimates and attendance</p></div></div>' +
         '<div class="card"><div class="card-head"><h2>Change password</h2></div><div class="card-body">' + passwordForm(false) + '</div></div></div>';
     } else if (st.tab === 'lists') {
@@ -2564,9 +2570,9 @@
     } else if (st.tab === 'members') {
       h += '<div class="filters" style="justify-content:flex-end"><button class="btn primary" data-act="member-add">' + icon('plus') + 'Add member</button></div>';
       h += '<div class="card">' + dataTable('members', [
-        { k: 'name', l: 'Member', primary: true, f: (u) => '<div style="display:flex;gap:10px;align-items:center">' + avatar(u, 30) + '<div><b>' + esc(u.name) + '</b><div class="cell-sub">' + esc(u.designation || '') + (u.employeeId && byId('Employees', u.employeeId) ? ' · Employee: ' + esc(byId('Employees', u.employeeId).name) : '') + '</div></div></div>' },
+        { k: 'name', l: 'Member', primary: true, f: (u) => '<div style="display:flex;gap:10px;align-items:center">' + avatar(u, 30) + '<div><b>' + esc(u.name) + '</b><div class="cell-sub">' + (u.employeeId && byId('Employees', u.employeeId) ? 'Linked employee: ' + esc(byId('Employees', u.employeeId).name) : '') + '</div></div></div>' },
         { k: 'email', l: 'Email', f: (u) => esc(u.email) + (u.phone ? '<div class="cell-sub">' + esc(u.phone) + '</div>' : '') },
-        { k: 'role', l: 'Access', f: (u) => statusBadge(u.role) },
+        { k: 'role', l: 'Access', v: (u) => u.role + ' ' + (u.designation || ''), f: (u) => accessBadge(u) },
         { k: 'status', l: 'Status', f: (u) => statusBadge(u.status) + (u.mustChange ? '<div class="cell-sub">Must set password</div>' : '') },
         { k: 'lastLogin', l: 'Last login', f: (u) => esc(fmtStamp(u.lastLogin)) },
       ], S.users, {
