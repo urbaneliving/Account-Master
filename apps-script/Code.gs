@@ -7,7 +7,9 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-03.1';
+const API_VERSION = '2026-11-04.1';
+const DOCS_FOLDER = 'Urbane Living - Client Documents';
+const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
 const SESSION_DAYS = 7;
 const MAX_LOGIN_FAILS = 5;
@@ -87,6 +89,9 @@ const SCHEMA = {
   },
   Attendance: {
     fields: 'id date:date email name checkIn checkOut ip method status notes ' + META_FIELDS,
+  },
+  Documents: {
+    fields: 'id clientId estimateNo kind name mime size:number fileId notes ' + META_FIELDS,
   },
   Settings: { fields: 'key value updatedBy updatedAt' },
   AuditLog: { fields: 'timestamp user action table recordId details' },
@@ -175,6 +180,11 @@ function route_(req) {
     case 'undoImport': return undoImport_(user, req.tag);
     case 'setHiddenTabs': return setHiddenTabs_(user, req.tabs);
     case 'setPhoto': return setPhoto_(user, req.photo);
+    case 'docList': return { docs: docList_(user, req.clientId, req.estimateNo) };
+    case 'docUpload': return docUpload_(user, req);
+    case 'docGet': return docGet_(user, req.id);
+    case 'docDelete': return docDelete_(user, req.id);
+    case 'estimateLinkClient': return estimateLinkClient_(user, req.estimateNo, req.clientId);
     case 'estimatesList': return { estimates: estimatesList_(user) };
     case 'removeMany': return removeMany_(user, req.table, req.ids);
     case 'mergeRecords': return mergeRecords_(user, req.table, req.keepId, req.removeIds);
@@ -1010,6 +1020,115 @@ function estimateImport_(user, records) {
   if (maxCounter > (Number(settings.estimateCounter) || 0)) writeSettings_(user, [['estimateCounter', maxCounter]]);
   audit_(user, 'import', 'Estimates', '', out.length + ' estimates from the old estimate page');
   return { imported: out.length, estimates: estimatesList_(user) };
+}
+
+// ---------------------------------------------------------------------------
+// Documents (estimates, approved designs, agreements, site photos) are kept in
+// a private Google Drive folder of the script owner and served through the API.
+// A document belongs to a client and/or an estimate; staff can attach files to
+// their own estimates, and they show on the client once the estimate is linked.
+// ---------------------------------------------------------------------------
+function canSeeEstimateNo_(user, estimateNo) {
+  if (canSeeAllEstimates_(user)) return true;
+  return estimateOwner_(readTable_('Estimates'), estimateNo) === String(user.email).toLowerCase();
+}
+
+function clientEstimateNos_(clientId) {
+  const c = readTable_('Clients').filter(function (x) { return x.id === clientId; })[0];
+  const nos = {};
+  if (c && c.estimateRef) nos[c.estimateRef] = true;
+  readTable_('Estimates').forEach(function (e) { if (e.clientId === clientId) nos[e.estimateNo] = true; });
+  return nos;
+}
+
+function docList_(user, clientId, estimateNo) {
+  const docs = readTable_('Documents');
+  if (clientId) {
+    needRole_(user, ACCOUNTS_ROLES);
+    const nos = clientEstimateNos_(clientId);
+    return docs.filter(function (d) { return d.clientId === clientId || (d.estimateNo && nos[d.estimateNo]); });
+  }
+  if (!estimateNo || !canSeeEstimateNo_(user, estimateNo)) throw err_('You cannot see this estimate', 'FORBIDDEN');
+  return docs.filter(function (d) { return d.estimateNo === estimateNo; });
+}
+
+function docsFolder_() {
+  const it = DriveApp.getFoldersByName(DOCS_FOLDER);
+  return it.hasNext() ? it.next() : DriveApp.createFolder(DOCS_FOLDER);
+}
+
+function docUpload_(user, req) {
+  const clientId = String(req.clientId || '');
+  const estimateNo = String(req.estimateNo || '');
+  if (clientId) {
+    needRole_(user, WRITE_ROLES);
+    if (!readTable_('Clients').some(function (c) { return c.id === clientId; })) throw err_('Client not found');
+  } else if (estimateNo) {
+    if (!canSeeEstimateNo_(user, estimateNo) || !readTable_('Estimates').some(function (e) { return e.estimateNo === estimateNo; })) throw err_('You cannot add files to this estimate', 'FORBIDDEN');
+  } else throw err_('Choose a client or an estimate');
+  const name = String(req.name || 'file').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 150);
+  const mime = String(req.mime || 'application/octet-stream').slice(0, 100);
+  if (!/^(application\/pdf|image\/|application\/(msword|vnd\.)|text\/plain)/.test(mime)) throw err_('Only PDF, images and Office files can be uploaded');
+  const bytes = Utilities.base64Decode(String(req.data || ''));
+  if (!bytes.length) throw err_('The file is empty');
+  if (bytes.length > MAX_DOC_BYTES) throw err_('File is larger than 10 MB');
+  const file = docsFolder_().createFile(Utilities.newBlob(bytes, mime, name));
+  const now = new Date().toISOString();
+  const o = {
+    id: newId_('DC'), clientId: clientId, estimateNo: estimateNo, kind: String(req.kind || 'Other').slice(0, 40), name: name, mime: mime,
+    size: bytes.length, fileId: file.getId(), notes: String(req.notes || '').slice(0, 300),
+    createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now,
+  };
+  appendObj_('Documents', o);
+  audit_(user, 'upload', 'Documents', o.id, o.kind + ': ' + name + (clientId ? ' (client)' : ' (estimate ' + estimateNo + ')'));
+  return { doc: o };
+}
+
+function docFind_(user, id) {
+  const d = readTable_('Documents').filter(function (x) { return x.id === id; })[0];
+  if (!d) throw err_('Document not found');
+  const ok = ACCOUNTS_ROLES.indexOf(user.role) >= 0 || (d.estimateNo && canSeeEstimateNo_(user, d.estimateNo)) || String(d.createdBy).toLowerCase() === String(user.email).toLowerCase();
+  if (!ok) throw err_('You cannot open this document', 'FORBIDDEN');
+  return d;
+}
+
+function docGet_(user, id) {
+  const d = docFind_(user, id);
+  const blob = DriveApp.getFileById(d.fileId).getBlob();
+  return { name: d.name, mime: d.mime, data: Utilities.base64Encode(blob.getBytes()) };
+}
+
+function docDelete_(user, id) {
+  const d = docFind_(user, id);
+  if (WRITE_ROLES.indexOf(user.role) < 0 && String(d.createdBy).toLowerCase() !== String(user.email).toLowerCase()) throw err_('Only the person who uploaded it, or Admin/Accountant, can delete it', 'FORBIDDEN');
+  try { DriveApp.getFileById(d.fileId).setTrashed(true); } catch (e) { /* already gone */ }
+  const sh = sheet_('Documents');
+  const values = sh.getDataRange().getValues();
+  const idCol = values[0].map(String).indexOf('id');
+  for (let i = values.length - 1; i >= 1; i--) if (String(values[i][idCol]) === id) { sh.deleteRow(i + 1); break; }
+  audit_(user, 'delete', 'Documents', id, d.kind + ': ' + d.name);
+  return {};
+}
+
+function estimateLinkClient_(user, estimateNo, clientId) {
+  needRole_(user, WRITE_ROLES);
+  const versions = readTable_('Estimates').filter(function (r) { return r.estimateNo === estimateNo; })
+    .sort(function (a, b) { return Number(b.version) - Number(a.version); });
+  if (!versions.length) throw err_('Estimate not found');
+  const c = readTable_('Clients').filter(function (x) { return x.id === clientId; })[0];
+  if (!c) throw err_('Client not found');
+  setEstimateFields_(estimateNo, { clientId: clientId, updatedBy: user.email, updatedAt: new Date().toISOString() });
+  const patch = {};
+  if (!c.estimateRef) patch.estimateRef = estimateNo;
+  if (!Number(c.approvedAmount) && Number(versions[0].grandTotal)) patch.approvedAmount = Number(versions[0].grandTotal);
+  if (Object.keys(patch).length) patchRow_('Clients', clientId, Object.assign(patch, { updatedBy: user.email, updatedAt: new Date().toISOString() }));
+  audit_(user, 'update', 'Estimates', estimateNo, 'Linked to client ' + c.name);
+  return { estimates: estimatesList_(user), client: readTable_('Clients').filter(function (x) { return x.id === clientId; })[0] };
+}
+
+/** Run once from the editor after updating, so the script may store files in Google Drive. */
+function authorizeDrive() {
+  Logger.log('Drive access OK. Documents folder: ' + docsFolder_().getName());
 }
 
 // ---------------------------------------------------------------------------
