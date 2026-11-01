@@ -601,8 +601,10 @@
     if (fd.t === 'select' || fd.t === 'ref') {
       let opts = fd.t === 'ref' ? refOptions(fd.ref, v) : (fd.opts || list(fd.list)).map((o) => [o, o]);
       if (v !== '' && !opts.some((o) => o[0] === v)) opts = opts.concat([[v, fd.t === 'ref' ? (clientName(v) || empName(v) || v) : v]]);
-      input = '<select class="input" id="' + id + '" name="' + fd.k + '"><option value="">' + (fd.req ? 'Select…' : '—') + '</option>' +
-        opts.map((o) => '<option value="' + esc(o[0]) + '"' + (o[0] === v ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') + '</select>';
+      const addNew = fd.list && canWrite();
+      input = '<select class="input" id="' + id + '" name="' + fd.k + '"' + (addNew ? ' data-list="' + fd.list + '" data-label="' + esc(fd.l) + '"' : '') + '><option value="">' + (fd.req ? 'Select…' : '—') + '</option>' +
+        opts.map((o) => '<option value="' + esc(o[0]) + '"' + (o[0] === v ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') +
+        (addNew ? '<option value="__new__">+ Add new…</option>' : '') + '</select>';
     } else if (fd.t === 'textarea') {
       input = '<textarea class="input" id="' + id + '" name="' + fd.k + '" rows="2">' + esc(v) + '</textarea>';
     } else {
@@ -807,7 +809,7 @@
     $('#root').innerHTML = '<div class="shell">' +
       '<aside class="sidebar">' + brand() + '<nav class="nav">' +
       NAV.filter((n) => !n[3] || seesAccounts()).map((n) => '<a href="#/' + n[0] + '" data-nav="' + n[0] + '">' + icon(n[2]) + '<span>' + n[1] + '</span></a>').join('') + '</nav>' +
-      '<div class="side-user"><a href="#/me" title="My account">' + avatar(u) + '</a><div class="who"><div style="font-weight:600">' + esc(u.name) + '</div><div class="small muted">' + esc(u.role) + (DEMO ? ' · Demo' : '') + '</div></div>' +
+      '<div class="side-user"><a href="#/me" title="My account">' + avatar(u) + '</a><div class="who"><div style="font-weight:600">' + esc(u.name) + '</div><div class="small muted">' + esc(u.designation || u.role) + (DEMO ? ' · Demo' : '') + '</div></div>' +
       '<button class="btn ghost icon" title="Switch theme" data-act="theme">' + icon('moon') + '</button>' +
       '<button class="btn ghost icon" title="Log out" data-act="logout">' + icon('logout') + '</button></div>' +
       '</aside><div class="scrim" data-act="nav-close"></div>' +
@@ -2706,7 +2708,13 @@
     const opt = (arr, v) => arr.map((o) => '<option' + (o === v ? ' selected' : '') + '>' + o + '</option>').join('');
     const body = '<div class="form-grid">' +
       '<label class="field">Name <input class="input" name="name" value="' + esc(u.name || '') + '"></label>' +
-      '<label class="field">Designation<input class="input" name="designation" value="' + esc(u.designation || '') + '"></label>' +
+      (() => {
+        const opts = list('designations').slice();
+        if (u.designation && !opts.includes(u.designation)) opts.push(u.designation);
+        return '<label class="field">Designation<select class="input" name="designation" data-list="designations" data-label="Designation"><option value="">—</option>' +
+          opts.map((d) => '<option' + (d === u.designation ? ' selected' : '') + '>' + esc(d) + '</option>').join('') + '<option value="__new__">+ Add new…</option></select>' +
+          '<span class="field-hint">Shown under their name everywhere. Also updates their linked employee.</span></label>';
+      })() +
       '<label class="field">Email (login ID)<input class="input" type="email" name="email" value="' + esc(u.email || '') + '"></label>' +
       '<label class="field">Mobile<input class="input" type="tel" name="phone" value="' + esc(u.phone || '') + '"></label>' +
       '<label class="field">Access<select class="input" name="role">' + opt(['Admin', 'Accountant', 'Viewer', 'Staff'], u.role) + '</select></label>' +
@@ -2974,8 +2982,28 @@
     if (e.target.matches('input[type=search][data-filter]')) onFilter(e);
     if (e.target.matches('[data-ep]')) estOnInput(e.target);
   });
-  document.addEventListener('change', (e) => {
+  document.addEventListener('change', async (e) => {
     const t = e.target;
+    if (t.matches && t.matches('select[data-list]') && t.value === '__new__') {
+      const v = (prompt('New ' + (t.dataset.label || 'item').toLowerCase() + ':') || '').trim();
+      if (!v) { t.value = ''; return; }
+      const key = t.dataset.list;
+      const cur = list(key);
+      if (!cur.includes(v)) {
+        const opt = document.createElement('option');
+        opt.textContent = v;
+        opt.value = v;
+        t.insertBefore(opt, t.querySelector('option[value="__new__"]'));
+        try {
+          const r = await api('saveSettings', { settings: { lists: { [key]: cur.concat([v]) } } });
+          S.settings = r.settings;
+          toast('"' + v + '" added to ' + (t.dataset.label || key));
+        } catch (err) { toast(err.message, true); }
+      }
+      t.value = v;
+      t.dispatchEvent(new Event('change', { bubbles: true }));
+      return;
+    }
     if (t.dataset.dupSel) { ui('dups').sel[t.dataset.dupSel] = t.checked; renderPage(); }
     if (t.dataset.dupKeep) { ui('dups').keep[t.dataset.dupKeep] = t.value; renderPage(); }
   });

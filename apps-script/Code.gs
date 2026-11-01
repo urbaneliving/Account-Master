@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-04.1';
+const API_VERSION = '2026-11-04.2';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -396,6 +396,7 @@ function saveRecord_(user, table, rec) {
       return rowIdx >= 0 ? values[rowIdx][j] : '';
     });
     writeRow_(sh, rowIdx >= 0 ? rowIdx + 1 : values.length + 1, headers, types, row);
+    if (table === 'Employees' && rec.designation) syncDesignation_(user, '', rec.id, rec.designation);
     audit_(user, rowIdx < 0 ? 'create' : 'update', table, rec.id, summary_(rec));
     return { record: rowToObj_(headers, row, types) };
   } finally {
@@ -562,6 +563,7 @@ function saveUser_(user, rec, password) {
     if (!users.some(function (u) { return u.id === rec.id; })) throw err_('Member not found');
     if (password) { setPassword_(patch, password); patch.mustChange = 'TRUE'; }
     patchRow_('Users', rec.id, patch);
+    syncDesignation_(user, patch.employeeId, '', patch.designation);
     if (status !== 'Active' || password) endUserSessions_(rec.id);
     audit_(user, 'update', 'Users', rec.id, patch.email + ' ' + patch.role + ' ' + patch.status);
     return {};
@@ -572,8 +574,26 @@ function saveUser_(user, rec, password) {
   patch.createdBy = user.email;
   patch.createdAt = now;
   appendObj_('Users', patch);
+  syncDesignation_(user, patch.employeeId, '', patch.designation);
   audit_(user, 'create', 'Users', patch.id, patch.email + ' ' + patch.role);
   return {};
+}
+
+// A member's designation and their linked employee's designation are kept the
+// same, and any new designation is added to the Designations dropdown list.
+function syncDesignation_(user, employeeId, fromEmployeeId, designation) {
+  designation = String(designation || '').trim();
+  if (!designation) return;
+  if (employeeId) {
+    const e = readTable_('Employees').filter(function (x) { return x.id === employeeId; })[0];
+    if (e && e.designation !== designation) patchRow_('Employees', employeeId, { designation: designation });
+  }
+  if (fromEmployeeId) {
+    readTable_('Users').filter(function (u) { return u.employeeId === fromEmployeeId && u.designation !== designation; })
+      .forEach(function (u) { patchRow_('Users', u.id, { designation: designation }); });
+  }
+  const list = readSettings_().lists.designations || [];
+  if (list.indexOf(designation) < 0) writeSettings_(user, [['list.designations', list.concat([designation])]]);
 }
 
 function resetPassword_(user, id, password) {
