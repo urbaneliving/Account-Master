@@ -1078,7 +1078,8 @@
 
     const pre = { clientId: c.id };
     h += '<div class="page-actions" style="margin-bottom:12px">' + addBtn('ClientWork', 'Add labour / material', pre) + addBtn('ClientPayments', 'Add payment received', pre) + '</div>';
-    h += tabs('client', [['work', 'Labour & material', s.work.length], ['payments', 'Payments received', s.pays.length], ['ledger', 'Statement']], 'work');
+    const linkedEst = clientEstimates(c);
+    h += tabs('client', [['work', 'Labour & material', s.work.length], ['payments', 'Payments received', s.pays.length], ['ledger', 'Statement'], ['docs', 'Estimates & designs', linkedEst.length + ((S.docs['c:' + c.id] || []).length)]], 'work');
 
     if (st.tab === 'work') {
       const work = s.work.filter((w) => (!st.costType || w.costType === st.costType) && (!st.workType || w.workType === st.workType) &&
@@ -1094,6 +1095,21 @@
         { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
       ], work, { actions: (r) => rowActions('ClientWork', r), name: c.name + ' work', sort: { k: 'date', dir: 'desc' }, empty: 'No labour or material entries yet' }) + '</div>';
       if (s.unpaidVendor) h += '<p class="small muted">Unpaid to vendors: <b class="neg">' + inr(s.unpaidVendor) + '</b></p>';
+    } else if (st.tab === 'docs') {
+      const free = estLatestList().filter((r) => !r.clientId && !linkedEst.some((x) => x.estimateNo === r.estimateNo));
+      h += '<h2 style="margin:0 0 10px">Estimates</h2><div class="card" style="margin-bottom:16px">' + dataTable('client-est', [
+        { k: 'estimateNo', l: 'Estimate', primary: true, f: (r) => '<b>' + esc(r.estimateNo) + '</b> <span class="badge">' + (r.version === 1 ? 'Original' : 'V' + (r.version - 1)) + '</span>' },
+        { k: 'estimateDate', l: 'Date', f: (r) => esc(fmtDate(r.estimateDate)) },
+        { k: 'grandTotal', l: 'Total', r: true, v: (r) => num(r.grandTotal), f: (r) => (num(r.grandTotal) ? inr(r.grandTotal) : 'As actual') },
+        { k: 'status', l: 'Status', f: (r) => statusBadge(r.status) },
+        { k: 'createdBy', l: 'By', f: (r) => esc(userName(r.createdBy)) },
+      ], linkedEst, { onRow: 'open-est', empty: 'No estimate linked yet' }) + '</div>';
+      if (canWrite() && free.length) {
+        h += '<div class="filters"><select class="input" id="link-est" style="flex:1;max-width:460px"><option value="">Link a saved estimate…</option>' +
+          free.sort((a, b) => String(b.estimateDate).localeCompare(String(a.estimateDate))).map((r) => '<option value="' + esc(r.estimateNo) + '">' + esc(r.estimateNo + ' · ' + r.clientName + ' · ' + (num(r.grandTotal) ? inr(r.grandTotal) : 'As actual')) + '</option>').join('') +
+          '</select><button class="btn" data-act="client-link-est" data-id="' + esc(c.id) + '">Link</button></div>';
+      }
+      h += '<h2 style="margin:16px 0 10px">Files — estimates, approved designs, agreements</h2>' + docsPanel('c:' + c.id, canWrite());
     } else if (st.tab === 'payments') {
       h += '<div class="filters">' + csvBtn('client-pay') + '</div>';
       h += '<div class="card">' + dataTable('client-pay', [
@@ -1694,6 +1710,8 @@
     if (e.id && (editable || canWrite())) extras.push('Status <select class="ainput" style="width:auto;height:26px;padding:0 6px" data-act-change="est-status">' + EST_STATUS.map((x) => '<option' + (x === e.status ? ' selected' : '') + '>' + x + '</option>').join('') + '</select>');
     if (e.id && canWrite()) extras.push(e.clientId && byId('Clients', e.clientId) ? '<a href="#/clients/' + encodeURIComponent(e.clientId) + '">Open client</a>' : '<a href="#" data-act="est-client">Create client from this estimate</a>');
     if (isAdmin() && !editing) extras.push('<a href="#" data-act="est-template">Use as default for new estimates</a>');
+    if (e.id) extras.push('<a href="#" data-act="est-files">📎 Files / approved design' + (S.docs['e:' + e.estimateNo] ? ' (' + S.docs['e:' + e.estimateNo].length + ')' : '') + '</a>');
+    if (e.id && canWrite() && !(e.clientId && byId('Clients', e.clientId))) extras.push('<a href="#" data-act="est-link">Link to existing client</a>');
     if (isAdmin()) extras.push('<a href="#" data-act="est-firebase">Import old estimates</a>');
     if (extras.length) h += '<div class="est-extras no-print">' + extras.join('<span class="dot">·</span>') + '</div>';
     h += estDocHtml(e, editing);
@@ -2042,16 +2060,39 @@
     const geoOn = S.settings.attendance && S.settings.attendance.geo && S.settings.attendance.geo.enabled;
     let h = pageHead('Attendance', 'Marked automatically when you open the dashboard from the office network', '');
     h += '<div class="card" style="margin-bottom:16px"><div class="card-body" style="display:flex;gap:16px;justify-content:space-between;align-items:center;flex-wrap:wrap">' +
-      '<div><div class="small muted">Today · ' + esc(fmtDate(today())) + '</div><div style="font-size:20px;font-weight:700;margin:4px 0">' +
+      '<div style="display:flex;gap:14px;align-items:center">' + avatar(S.user, 52) + '<div><div style="font-weight:700;font-size:16px">' + esc(S.user.name) + ' <span class="muted small" style="font-weight:400">' + esc(S.user.designation || '') + '</span></div>' +
+      '<div class="small muted">Today · ' + esc(fmtDate(today())) + '</div><div style="font-size:20px;font-weight:700;margin:4px 0">' +
       (t ? statusBadge(t.status) + ' In ' + esc(t.checkIn) + (t.checkOut ? ' · Out / last seen ' + esc(t.checkOut) : '') : 'Not marked yet') + '</div>' +
-      '<div class="small ' + (ips ? (inOffice ? 'pos' : 'neg') : 'muted') + '">' + (ips ? (inOffice ? '✓ On office network' : '✗ Not on office network') + ' · IP ' + esc(ips.list.join(', ') || 'unknown') : 'Checking your network…') + '</div></div>' +
+      '<div class="small ' + (ips ? (inOffice ? 'pos' : 'neg') : 'muted') + '">' + (ips ? (inOffice ? '✓ On office network' : '✗ Not on office network') + ' · IP ' + esc(ips.list.join(', ') || 'unknown') : 'Checking your network…') + '</div></div></div>' +
       '<div class="page-actions">' + (!t ? '<button class="btn primary" data-act="att-mark" data-kind="in">Check in</button>' : '<button class="btn" data-act="att-mark" data-kind="out">Check out</button>') +
       (geoOn && !inOffice ? '<button class="btn" data-act="att-mark" data-kind="' + (t ? 'out' : 'in') + '" data-geo="1">Use my location</button>' : '') + '</div></div></div>';
-    if (team) h += tabs('attendance', [['me', 'My attendance'], ['team', 'Team']], 'me');
+    if (team) h += tabs('attendance', [['me', 'My attendance'], ['today', 'Today'], ['team', 'Month']], 'me');
     else st.tab = 'me';
-    h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Month">' + (st.tab === 'team' ? '<button class="btn sm" data-act="att-csv">' + icon('download') + 'Export</button>' : '') + '</div>';
+    if (st.tab === 'today') st.month = thisMonth();
+    if (st.tab !== 'today') h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Month">' + (st.tab === 'team' ? '<button class="btn sm" data-act="att-csv">' + icon('download') + 'Export</button>' : '') + '</div>';
     const rowsM = S.attRows && S.attRows[st.month];
     if (!rowsM) return h + '<div class="loading" style="min-height:160px"><div class="spinner"></div></div>';
+
+    if (st.tab === 'today') {
+      const td = today();
+      const byEmail = {};
+      rowsM.filter((r) => r.date === td).forEach((r) => { byEmail[r.email.toLowerCase()] = r; });
+      const list = S.users.filter((u) => u.status === 'Active').map((u) => Object.assign({ id: u.id, u: u }, { r: byEmail[u.email.toLowerCase()] || null }));
+      const present = list.filter((x) => x.r && ['Present', 'Late', 'Half Day'].includes(x.r.status));
+      h += '<div class="kpis">' + kpi('In office today', present.length + ' / ' + list.length) + kpi('Late', String(list.filter((x) => x.r && x.r.status === 'Late').length)) +
+        kpi('On leave', String(list.filter((x) => x.r && x.r.status === 'Leave').length)) + kpi('Not marked', String(list.filter((x) => !x.r).length), '', list.some((x) => !x.r) ? 'bad' : '') + '</div>';
+      h += '<div class="card">' + dataTable('att-today', [
+        { k: 'name', l: 'Name', primary: true, v: (x) => x.u.name, f: (x) => '<div style="display:flex;gap:10px;align-items:center">' + avatar(x.u, 34) + '<div><b>' + esc(x.u.name) + '</b><div class="cell-sub">' + esc(x.u.designation || x.u.role) + '</div></div></div>' },
+        { k: 'status', l: 'Status', v: (x) => (x.r ? x.r.status : 'Not marked'), f: (x) => (x.r ? statusBadge(x.r.status) : '<span class="badge bad">Not marked</span>') },
+        { k: 'in', l: 'In', v: (x) => (x.r ? x.r.checkIn : ''), f: (x) => esc(x.r ? x.r.checkIn : '') },
+        { k: 'out', l: 'Out / last seen', v: (x) => (x.r ? x.r.checkOut : ''), f: (x) => esc(x.r ? x.r.checkOut : '') },
+        { k: 'method', l: 'Marked by', v: (x) => (x.r ? x.r.method : ''), f: (x) => (x.r ? esc(x.r.method) + (x.r.ip ? '<div class="cell-sub">' + esc(x.r.ip) + '</div>' : '') : '') },
+      ], list, {
+        sort: { k: 'name', dir: 'asc' },
+        actions: isAdmin() ? (x) => '<button class="btn sm" data-act="att-edit" data-email="' + esc(x.u.email) + '" data-date="' + td + '">' + icon('edit') + 'Edit</button>' : null,
+      }) + '</div>';
+      return h;
+    }
 
     if (st.tab !== 'team') {
       const mine = rowsM.filter((r) => r.email.toLowerCase() === myEmail());
@@ -2340,6 +2381,152 @@
     toast(removed + ' duplicate entries removed' + (errors.length ? ' · ' + errors.length + ' could not be removed' : ''), !!errors.length);
     if (errors.length) alert(errors.join('\n'));
     renderPage();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Documents — estimates, approved designs, agreements, site photos. Stored in
+  // a private Google Drive folder; attached to a client or to an estimate.
+  // ---------------------------------------------------------------------------
+  const DOC_KINDS = ['Approved design', 'Estimate', 'Agreement', 'Site photo', 'Bill / Invoice', 'Other'];
+  const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
+  if (!S.docs) S.docs = {};
+
+  function loadDocs(key) {
+    if (S.docsLoading === key) return;
+    S.docsLoading = key;
+    const params = key.startsWith('c:') ? { clientId: key.slice(2) } : { estimateNo: key.slice(2) };
+    api('docList', params).then((r) => {
+      S.docs[key] = r.docs;
+      S.docsLoading = null;
+      if ($('[data-docs="' + key + '"]')) refreshDocs(key);
+    }).catch((e) => { S.docsLoading = null; S.docs[key] = []; toast(e.message, true); });
+  }
+
+  function docsListHtml(key) {
+    const docs = S.docs[key];
+    if (!docs) return '<div class="loading" style="min-height:100px"><div class="spinner"></div></div>';
+    if (!docs.length) return '<div class="empty">No files yet</div>';
+    return dataTable('docs-' + key, [
+      { k: 'name', l: 'File', primary: true, f: (d) => '<a href="#" data-act="doc-view" data-id="' + esc(d.id) + '"><b>' + esc(d.name) + '</b></a>' + (d.notes ? '<div class="cell-sub">' + esc(d.notes) + '</div>' : '') },
+      { k: 'kind', l: 'Type', f: (d) => '<span class="badge' + (d.kind === 'Approved design' ? ' good' : '') + '">' + esc(d.kind) + '</span>' + (d.estimateNo ? '<div class="cell-sub">' + esc(d.estimateNo) + '</div>' : '') },
+      { k: 'createdAt', l: 'Uploaded', f: (d) => esc(fmtStamp(d.createdAt)) + '<div class="cell-sub">by ' + esc(userName(d.createdBy)) + '</div>' },
+      { k: 'size', l: 'Size', r: true, v: (d) => num(d.size), f: (d) => fmtSize(num(d.size)) },
+      { k: 'act', l: '', f: (d) => '<button class="btn ghost sm" data-act="doc-view" data-id="' + esc(d.id) + '">' + icon('download') + 'Open</button>' +
+        (canWrite() || String(d.createdBy).toLowerCase() === myEmail() ? '<button class="btn ghost sm icon danger" title="Delete" data-act="doc-del" data-id="' + esc(d.id) + '" data-key="' + esc(key) + '">' + icon('trash') + '</button>' : '') },
+    ], docs, { sort: { k: 'createdAt', dir: 'desc' } });
+  }
+
+  function docsPanel(key, canUpload) {
+    if (!S.docs[key]) loadDocs(key);
+    return '<div data-docs="' + esc(key) + '">' + (canUpload ? '<div class="card" data-doc-form="' + esc(key) + '" style="margin-bottom:12px"><div class="card-body"><div class="filters" style="margin:0">' +
+      '<select class="input" name="kind" aria-label="Type">' + DOC_KINDS.map((k) => '<option>' + k + '</option>').join('') + '</select>' +
+      '<input class="input" type="file" name="files" multiple accept=".pdf,image/*,.doc,.docx,.xls,.xlsx,.ppt,.pptx" style="height:auto;padding:6px;flex:1;min-width:200px">' +
+      '<input class="input" name="notes" placeholder="Note (optional)" style="flex:1;min-width:160px">' +
+      '<button class="btn primary" type="button" data-act="doc-upload">' + icon('plus') + 'Upload</button></div>' +
+      '<div class="small muted" style="margin-top:6px">PDF, photos or Office files, up to 10 MB each. Files stay private to the team.</div></div></div>' : '') +
+      '<div class="card" data-docs-list="' + esc(key) + '">' + docsListHtml(key) + '</div></div>';
+  }
+  function refreshDocs(key) {
+    const el = $('[data-docs-list="' + key + '"]');
+    if (el) el.innerHTML = docsListHtml(key);
+  }
+
+  function readAsBase64(file) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result).split(',')[1] || '');
+      r.onerror = () => rej(new Error('Could not read ' + file.name));
+      r.readAsDataURL(file);
+    });
+  }
+
+  async function uploadDocs(form) {
+    const key = form.dataset.docForm;
+    const field = (n) => $('[name=' + n + ']', form);
+    const files = Array.from(field('files').files);
+    if (!files.length) return toast('Choose a file first', true);
+    const big = files.find((f) => f.size > 10 * 1024 * 1024);
+    if (big) return toast(big.name + ' is larger than 10 MB', true);
+    const btn = $('[data-act=doc-upload]', form);
+    btn.disabled = true;
+    const base = key.startsWith('c:') ? { clientId: key.slice(2) } : { estimateNo: key.slice(2) };
+    let done = 0;
+    try {
+      for (const f of files) {
+        btn.textContent = 'Uploading ' + (done + 1) + ' of ' + files.length + '…';
+        const data = await readAsBase64(f);
+        const r = await api('docUpload', Object.assign({ kind: field('kind').value, name: f.name, mime: f.type || 'application/octet-stream', data: data, notes: field('notes').value }, base));
+        (S.docs[key] = S.docs[key] || []).push(r.doc);
+        done++;
+      }
+      toast(plural(done, 'file') + ' uploaded');
+      field('files').value = '';
+      field('notes').value = '';
+    } catch (e) { toast(e.message, true); }
+    btn.disabled = false;
+    btn.innerHTML = icon('plus') + 'Upload';
+    Object.keys(S.docs).forEach((k) => { if (k !== key) delete S.docs[k]; });
+    refreshDocs(key);
+    if (S.est && S.est.estimateNo && key === 'e:' + S.est.estimateNo && route().page === 'estimates') renderPage();
+  }
+
+  async function viewDoc(id) {
+    const w = window.open('', '_blank');
+    if (w) w.document.write('<p style="font-family:sans-serif">Opening…</p>');
+    try {
+      const r = await api('docGet', { id: id });
+      const bin = atob(r.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: r.mime }));
+      if (w && /^(application\/pdf|image\/)/.test(r.mime)) w.location.href = url;
+      else {
+        if (w) w.close();
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = r.name;
+        a.click();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) {
+      if (w) w.close();
+      toast(e.message, true);
+    }
+  }
+
+  function openEstimateFiles() {
+    const e = S.est;
+    const key = 'e:' + e.estimateNo;
+    openModal('Files · ' + e.estimateNo + ' · ' + (e.client.name || ''), docsPanel(key, true) +
+      '<p class="small muted">Files added here also show on the client page once this estimate is linked to a client.</p>', { wide: true, foot: '' });
+    $('.modal-foot') && $('.modal-foot').remove();
+  }
+
+  function openLinkClient() {
+    const e = S.est;
+    const clients = rows('Clients').slice().sort((a, b) => a.name.localeCompare(b.name));
+    const guess = clients.find((c) => normName(c.name) === normName(e.client.name));
+    openModal('Link ' + e.estimateNo + ' to a client', '<label class="field">Client<select class="input" name="clientId">' +
+      clients.map((c) => '<option value="' + esc(c.id) + '"' + (guess && guess.id === c.id ? ' selected' : '') + '>' + esc(c.name + (c.clientCode ? ' · ' + c.clientCode : '')) + '</option>').join('') + '</select>' +
+      '<span class="field-hint">The estimate and its files will show on that client’s page. If the client has no approved amount yet, the estimate total is used.</span></label>', {
+      submit: 'Link',
+      onSubmit: async (f) => {
+        const r = await api('estimateLinkClient', { estimateNo: e.estimateNo, clientId: f.clientId.value });
+        S.estimates = r.estimates;
+        const i = rows('Clients').findIndex((c) => c.id === r.client.id);
+        if (i >= 0) S.data.Clients[i] = r.client;
+        S.est.clientId = r.client.id;
+        Object.keys(S.docs).forEach((k) => delete S.docs[k]);
+        toast('Linked to ' + r.client.name);
+        renderPage();
+      },
+    });
+  }
+
+  function clientEstimates(c) {
+    const nos = new Set((S.estimates || []).filter((x) => x.clientId === c.id).map((x) => x.estimateNo));
+    if (c.estimateRef) nos.add(c.estimateRef);
+    return estLatestList().filter((r) => nos.has(r.estimateNo));
   }
 
   // ---------------------------------------------------------------------------
@@ -2703,6 +2890,31 @@
         } catch (err) { toast(err.message, true); }
         break;
       case 'dup-run': runDuplicates(el); break;
+      case 'doc-view': e.preventDefault(); viewDoc(el.dataset.id); break;
+      case 'doc-upload': uploadDocs(el.closest('[data-doc-form]')); break;
+      case 'doc-del': {
+        const key = el.dataset.key;
+        const d = (S.docs[key] || []).find((x) => x.id === el.dataset.id);
+        if (!d || !confirm('Delete ' + d.name + '?')) break;
+        try { await api('docDelete', { id: d.id }); S.docs[key] = S.docs[key].filter((x) => x.id !== d.id); toast('File deleted'); refreshDocs(key); } catch (err) { toast(err.message, true); }
+        break;
+      }
+      case 'est-files': e.preventDefault(); openEstimateFiles(); break;
+      case 'est-link': e.preventDefault(); openLinkClient(); break;
+      case 'client-link-est': {
+        const no = $('#link-est').value;
+        if (!no) { toast('Choose an estimate', true); break; }
+        try {
+          const r = await api('estimateLinkClient', { estimateNo: no, clientId: el.dataset.id });
+          S.estimates = r.estimates;
+          const i = rows('Clients').findIndex((c) => c.id === r.client.id);
+          if (i >= 0) S.data.Clients[i] = r.client;
+          delete S.docs['c:' + el.dataset.id];
+          toast(no + ' linked');
+          renderPage();
+        } catch (err) { toast(err.message, true); }
+        break;
+      }
       case 'go-dups': ui('settings').tab = 'duplicates'; break;
       case 'est-firebase': e.preventDefault(); openFirebaseImport(); break;
       case 'photo-remove': if (confirm('Remove your photo?')) { try { await savePhoto(''); toast('Photo removed'); } catch (err) { toast(err.message, true); } } break;
