@@ -2538,6 +2538,86 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Guides (Settings → Guide) — content lives in assets/js/guides.js
+  // ---------------------------------------------------------------------------
+  const GUIDE_UI = {
+    en: { search: 'Search guides…', steps: 'steps', need: 'What you need', done: 'done', of: 'of', mark: 'Mark as done', reset: 'Start over', print: 'Print', back: 'All guides', by: 'Prepared by', updated: 'Updated', call: 'Call', whatsapp: 'WhatsApp', email: 'Email', stuck: 'Stuck? Send a photo of the screen to', none: 'No guide matches your search', allDone: 'All steps done 🎉', progress: (d, n) => d + ' of ' + n + ' steps done' },
+    hi: { search: 'गाइड खोजिए…', steps: 'स्टेप', need: 'क्या चाहिए', done: 'पूरे', of: 'में से', mark: 'हो गया', reset: 'फिर से शुरू', print: 'प्रिंट', back: 'सभी गाइड', by: 'तैयार किया', updated: 'अपडेट', call: 'कॉल', whatsapp: 'WhatsApp', email: 'ईमेल', stuck: 'अटक गए? स्क्रीन की फ़ोटो भेजिए', none: 'कोई गाइड नहीं मिली', allDone: 'सारे स्टेप पूरे 🎉', progress: (d, n) => n + ' में से ' + d + ' स्टेप पूरे' },
+  };
+  const guideLang = () => store.get('am_lang') === 'hi' ? 'hi' : 'en';
+  const tr = (o) => (o && typeof o === 'object' ? (o[guideLang()] || o.en || '') : (o || ''));
+  function gfmt(text) {
+    return esc(text)
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/`(.+?)`/g, '<code>$1</code>')
+      .replace(/\[\[(.+?)\]\]/g, '<kbd>$1</kbd>')
+      .replace(/\b((?:[a-z0-9-]+\.)+(?:com|in|org|net)(?:\/[\w\-./]*)?)/gi, (m) => '<a href="https://' + m + '" target="_blank" rel="noopener">' + m + '</a>');
+  }
+  function guideProgress(id) {
+    try { return JSON.parse(store.get('am_guide_' + id) || '[]'); } catch (e) { return []; }
+  }
+
+  function guideHtml() {
+    const guides = window.UL_GUIDES || [];
+    const st = ui('guide');
+    const L = GUIDE_UI[guideLang()];
+    const langSwitch = '<div class="lang-switch" role="group" aria-label="Language">' +
+      [['en', 'English'], ['hi', 'हिंदी']].map((x) => '<button type="button" data-act="guide-lang" data-id="' + x[0] + '" class="' + (guideLang() === x[0] ? 'active' : '') + '">' + x[1] + '</button>').join('') + '</div>';
+    const g = guides.find((x) => x.id === st.open) || (guides.length === 1 ? guides[0] : null);
+    if (!g) {
+      const q = (st.q || '').toLowerCase();
+      const list = guides.filter((x) => !q || (tr(x.title) + ' ' + tr(x.summary) + ' ' + x.title.en).toLowerCase().includes(q));
+      return '<div class="guide-top"><input class="input search" type="search" data-guide-q placeholder="' + esc(L.search) + '" value="' + esc(st.q || '') + '">' + langSwitch + '</div>' +
+        (list.length ? '<div class="guide-cards">' + list.map((x) => {
+          const pr = guideProgress(x.id).length;
+          return '<a href="#" class="card guide-card" data-act="guide-open" data-id="' + esc(x.id) + '"><div class="gi">' + (x.icon || '📘') + '</div><div><div class="badge">' + esc(tr(x.category)) + '</div>' +
+            '<h2 style="margin:6px 0 4px">' + esc(tr(x.title)) + '</h2><div class="small muted">' + esc(tr(x.summary)) + '</div>' +
+            '<div class="small" style="margin-top:8px">' + x.steps.length + ' ' + L.steps + (pr ? ' · ' + pr + ' ' + L.done : '') + '</div></div></a>';
+        }).join('') + '</div>' : '<div class="empty">' + L.none + '</div>');
+    }
+    const done = guideProgress(g.id);
+    const pct = Math.round(done.length / g.steps.length * 100);
+    const a = g.author || {};
+    let h = '<div class="guide no-print-shell">';
+    h += '<div class="guide-top">' + (guides.length > 1 ? '<a href="#" class="back" data-act="guide-open" data-id="">' + icon('back') + L.back + '</a>' : '<span></span>') +
+      '<div class="sp">' + langSwitch + '<button class="btn sm" data-act="guide-print">' + icon('print') + L.print + '</button></div></div>';
+    h += '<div class="card guide-head"><div class="card-body"><div class="badge accent">' + esc(tr(g.category)) + ' · ' + L.updated + ' ' + esc(g.updated || '') + '</div>' +
+      '<h1 style="margin:10px 0 6px">' + (g.icon ? g.icon + ' ' : '') + esc(tr(g.title)) + '</h1><p class="muted" style="margin:0">' + gfmt(tr(g.summary)) + '</p>';
+    if (g.needs && g.needs.length) h += '<div class="small muted" style="margin:14px 0 6px">' + L.need + '</div><div class="guide-needs">' + g.needs.map((n) => '<span>' + (n.icon || '') + ' ' + esc(tr(n)) + '</span>').join('') + '</div>';
+    if (a.name) {
+      h += '<div class="guide-author"><div><div class="small muted">' + L.by + '</div><b>' + esc(a.name) + '</b> · ' + esc(a.role || '') + '</div><div class="sp">' +
+        (a.phones || []).map((ph) => '<a class="btn sm" href="tel:+91' + esc(ph) + '">📞 ' + esc(ph) + '</a>').join('') +
+        (a.phones && a.phones[0] ? '<a class="btn sm" href="https://wa.me/91' + esc(a.phones[0]) + '" target="_blank" rel="noopener">💬 ' + L.whatsapp + '</a>' : '') +
+        (a.email ? '<a class="btn sm" href="mailto:' + esc(a.email) + '">✉️ ' + esc(a.email) + '</a>' : '') + '</div></div>';
+    }
+    h += '<div class="guide-progress"><div class="bar"><i style="width:' + pct + '%"></i></div><span class="small">' + (done.length === g.steps.length ? L.allDone : L.progress(done.length, g.steps.length)) + '</span>' +
+      (done.length ? '<button class="btn ghost sm" data-act="guide-reset" data-id="' + esc(g.id) + '">' + L.reset + '</button>' : '') + '</div></div></div>';
+
+    g.steps.forEach((s, i) => {
+      const isDone = done.includes(i);
+      h += '<div class="card guide-step' + (isDone ? ' done' : '') + '"><div class="card-body"><div class="gs-head"><div class="gs-num">' + (isDone ? '✓' : i + 1) + '</div>' +
+        '<h2>' + esc(tr(s.title)) + '</h2>' + (s.tag ? '<span class="badge">' + esc(tr(s.tag)) + '</span>' : '') + '</div>';
+      h += '<ol class="gs-list">' + s.items.map((it) => '<li>' + gfmt(tr(it)) + '</li>').join('') + '</ol>';
+      if (s.keys) {
+        h += '<div class="small muted" style="margin:10px 0 6px">' + esc(tr(s.keys.title)) + '</div><div class="guide-keys">' +
+          s.keys.rows.map((k) => '<span class="' + (k[2] ? 'hl' : '') + '"><kbd>' + esc(k[0]) + '</kbd> ' + esc(k[1]) + '</span>').join('') + '</div>';
+      }
+      if (s.table) {
+        h += '<div class="table-wrap" style="margin-top:12px"><table class="data cards"><thead><tr>' + tr(s.table.head).map((x) => '<th>' + esc(x) + '</th>').join('') + '</tr></thead><tbody>' +
+          s.table.rows.map((r) => '<tr>' + r.map((c, j) => {
+            const label = tr(s.table.head)[j];
+            if (j === r.length - 1) return '<td data-label="' + esc(label) + '"><span class="badge ' + (c === 'delete' ? 'bad' : 'good') + '">' + esc(tr(s.table.actions[c])) + '</span></td>';
+            return '<td data-label="' + esc(label) + '"' + (j === 0 ? ' class="primary-cell"' : '') + '>' + esc(tr(c)) + '</td>';
+          }).join('') + '</tr>').join('') + '</tbody></table></div>';
+      }
+      if (s.note) h += '<div class="guide-note ' + (s.note.type || 'info') + '">' + ({ warn: '⚠️', danger: '⛔', info: 'ℹ️' }[s.note.type] || 'ℹ️') + ' ' + gfmt(tr(s.note)) + '</div>';
+      h += '<div style="margin-top:12px"><label class="guide-check"><input type="checkbox" data-guide-step="' + esc(g.id) + '|' + i + '"' + (isDone ? ' checked' : '') + '> ' + L.mark + '</label></div></div></div>';
+    });
+    if (a.name) h += '<p class="small muted" style="text-align:center">' + L.stuck + ' <b>' + esc(a.name) + '</b>' + (a.phones && a.phones[0] ? ' · ' + esc(a.phones.join(' / ')) : '') + '</p>';
+    return h + '</div>';
+  }
+
+  // ---------------------------------------------------------------------------
   // Settings
   // ---------------------------------------------------------------------------
   const LIST_LABELS = {
@@ -2547,14 +2627,16 @@
 
   function viewSettings() {
     const st = ui('settings');
-    const items = [['profile', 'My profile']];
+    const items = [['profile', 'My profile'], ['guide', 'Guide']];
     if (canWrite()) items.push(['lists', 'Dropdown lists'], ['duplicates', 'Duplicates', findDuplicates().length]);
     if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['attendance', 'Attendance'], ['import', 'Import data'], ['activity', 'Activity log']);
     if (!items.some((i) => i[0] === st.tab)) st.tab = 'profile';
     let h = pageHead('Settings', '');
     h += tabs('settings', items, 'profile');
 
-    if (st.tab === 'profile') {
+    if (st.tab === 'guide') {
+      h += guideHtml();
+    } else if (st.tab === 'profile') {
       const u = S.user;
       h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Profile</h2><a href="#/me">My account →</a></div><div class="card-body"><div class="breakdown">' +
         '<span class="muted">Name</span><span>' + esc(u.name) + '</span><span class="muted">Email</span><span>' + esc(u.email) + '</span>' +
@@ -2904,6 +2986,10 @@
         } catch (err) { toast(err.message, true); }
         break;
       case 'dup-run': runDuplicates(el); break;
+      case 'guide-lang': store.set('am_lang', el.dataset.id); renderPage(); break;
+      case 'guide-open': e.preventDefault(); ui('guide').open = el.dataset.id; renderPage(); window.scrollTo(0, 0); break;
+      case 'guide-reset': store.del('am_guide_' + el.dataset.id); renderPage(); break;
+      case 'guide-print': document.body.classList.add('print-guide'); window.print(); setTimeout(() => document.body.classList.remove('print-guide'), 500); break;
       case 'doc-view': e.preventDefault(); viewDoc(el.dataset.id); break;
       case 'doc-upload': uploadDocs(el.closest('[data-doc-form]')); break;
       case 'doc-del': {
@@ -2987,9 +3073,26 @@
   document.addEventListener('input', (e) => {
     if (e.target.matches('input[type=search][data-filter]')) onFilter(e);
     if (e.target.matches('[data-ep]')) estOnInput(e.target);
+    if (e.target.matches('[data-guide-q]')) {
+      ui('guide').q = e.target.value;
+      const pos = e.target.selectionStart;
+      renderPage();
+      const n = $('[data-guide-q]');
+      if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (err) { /* ignore */ } }
+    }
   });
   document.addEventListener('change', async (e) => {
     const t = e.target;
+    if (t.dataset && t.dataset.guideStep) {
+      const [gid, idx] = t.dataset.guideStep.split('|');
+      const cur = guideProgress(gid).filter((x) => x !== Number(idx));
+      if (t.checked) cur.push(Number(idx));
+      store.set('am_guide_' + gid, JSON.stringify(cur));
+      const y = window.scrollY;
+      renderPage();
+      window.scrollTo(0, y);
+      return;
+    }
     if (t.matches && t.matches('select[data-list]') && t.value === '__new__') {
       const v = (prompt('New ' + (t.dataset.label || 'item').toLowerCase() + ':') || '').trim();
       if (!v) { t.value = ''; return; }
