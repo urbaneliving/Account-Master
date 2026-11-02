@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-04.2';
+const API_VERSION = '2026-11-05.1';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -93,6 +93,10 @@ const SCHEMA = {
   Documents: {
     fields: 'id clientId estimateNo kind name mime size:number fileId notes ' + META_FIELDS,
   },
+  Guides: { fields: 'id sort:number category title data ' + META_FIELDS },
+  LeaveRequests: {
+    fields: 'id email name designation type fromDate:date toDate:date days:number reason status decidedBy decidedAt decisionNote ' + META_FIELDS,
+  },
   Settings: { fields: 'key value updatedBy updatedAt' },
   AuditLog: { fields: 'timestamp user action table recordId details' },
 };
@@ -116,6 +120,15 @@ const DEFAULT_SETTINGS = {
   employeeSource: null,
   imports: [],
   hiddenTabs: [],
+  leaveApprovers: [
+    { email: 'abhishek@urbaneliving.in', scope: 'all' }, { email: 'digvijay@urbaneliving.in', scope: 'all' },
+    { email: 'it@urbaneliving.in', scope: 'all' }, { email: 'vibhooti@urbaneliving.in', scope: 'sales' },
+  ],
+  notifications: {
+    email: true,
+    managers: ['abhishek@urbaneliving.in', 'digvijay@urbaneliving.in'],
+    events: { late: true, leaveRequest: true, leaveDecision: true, salaryPaid: true, advance: true, clientPayment: true, estimateApproved: true },
+  },
   lists: {
     projectTypes: ['Residential', 'Commercial', 'Office', 'Showroom', 'Restaurant', 'Other'],
     clientStatus: ['Ongoing', 'Completed', 'On Hold', 'Cancelled'],
@@ -180,6 +193,13 @@ function route_(req) {
     case 'undoImport': return undoImport_(user, req.tag);
     case 'setHiddenTabs': return setHiddenTabs_(user, req.tabs);
     case 'setPhoto': return setPhoto_(user, req.photo);
+    case 'guidesList': return { guides: guidesList_() };
+    case 'guideSave': return guideSave_(user, req.guide);
+    case 'guideDelete': return guideDelete_(user, req.id);
+    case 'leaveList': return { leaves: leaveList_(user) };
+    case 'leaveSubmit': return leaveSubmit_(user, req.record);
+    case 'leaveDecide': return leaveDecide_(user, req.id, req.decision, req.note);
+    case 'leaveCancel': return leaveCancel_(user, req.id);
     case 'docList': return { docs: docList_(user, req.clientId, req.estimateNo) };
     case 'docUpload': return docUpload_(user, req);
     case 'docGet': return docGet_(user, req.id);
@@ -328,10 +348,12 @@ function bootstrap_(user) {
     data: data,
     estimates: estimatesList_(user),
     me: mySelf_(user),
+    guides: guidesList_(),
+    leaves: leaveList_(user),
     attendanceToday: attendanceToday_(user),
     users: users.map(function (u) {
       const p = publicUser_(u);
-      if (user.role !== 'Admin') return { id: p.id, name: p.name, email: p.email, designation: p.designation, role: p.role, status: p.status, photo: p.photo };
+      if (user.role !== 'Admin') return { id: p.id, name: p.name, email: p.email, phone: p.phone, designation: p.designation, role: p.role, status: p.status, photo: p.photo };
       return p;
     }),
   };
@@ -398,6 +420,7 @@ function saveRecord_(user, table, rec) {
     writeRow_(sh, rowIdx >= 0 ? rowIdx + 1 : values.length + 1, headers, types, row);
     if (table === 'Employees' && rec.designation) syncDesignation_(user, '', rec.id, rec.designation);
     audit_(user, rowIdx < 0 ? 'create' : 'update', table, rec.id, summary_(rec));
+    if (rowIdx < 0) notifyRecord_(table, rowToObj_(headers, row, types));
     return { record: rowToObj_(headers, row, types) };
   } finally {
     lock.releaseLock();
@@ -622,7 +645,8 @@ function readSettings_() {
       else if (r.key === 'attendance') s.attendance = Object.assign(s.attendance, v);
       else if (r.key === 'estimateCounter') s.estimateCounter = Number(v) || s.estimateCounter;
       else if (r.key === 'estimateTemplate') s.estimateTemplate = v;
-      else if ((r.key === 'imports' || r.key === 'hiddenTabs') && Array.isArray(v)) s[r.key] = v;
+      else if ((r.key === 'imports' || r.key === 'hiddenTabs' || r.key === 'leaveApprovers') && Array.isArray(v)) s[r.key] = v;
+      else if (r.key === 'notifications') s.notifications = Object.assign(s.notifications, v, { events: Object.assign(s.notifications.events, v.events || {}) });
       else if (r.key.indexOf('list.') === 0 && Array.isArray(v)) s.lists[r.key.slice(5)] = v;
     } catch (e) { /* ignore malformed values */ }
   });
@@ -657,6 +681,22 @@ function saveSettings_(user, settings) {
   if ('estimateCounter' in settings) {
     if (user.role !== 'Admin') throw err_('Only Admin can change the estimate counter', 'FORBIDDEN');
     entries.push(['estimateCounter', Math.max(0, Math.floor(Number(settings.estimateCounter) || 0))]);
+  }
+  if (settings.leaveApprovers) {
+    if (user.role !== 'Admin') throw err_('Only Admin can change leave approvers', 'FORBIDDEN');
+    entries.push(['leaveApprovers', settings.leaveApprovers.map(function (a) {
+      return { email: String(a.email || '').trim().toLowerCase(), scope: a.scope === 'sales' ? 'sales' : 'all' };
+    }).filter(function (a) { return /@/.test(a.email); })]);
+  }
+  if (settings.notifications) {
+    if (user.role !== 'Admin') throw err_('Only Admin can change notifications', 'FORBIDDEN');
+    const n = settings.notifications;
+    const ev = {};
+    Object.keys(DEFAULT_SETTINGS.notifications.events).forEach(function (k) { ev[k] = !!(n.events && n.events[k]); });
+    entries.push(['notifications', {
+      email: n.email !== false, events: ev,
+      managers: (n.managers || []).map(function (x) { return String(x).trim().toLowerCase(); }).filter(function (x) { return /@/.test(x); }),
+    }]);
   }
   if ('estimateTemplate' in settings) {
     if (user.role !== 'Admin') throw err_('Only Admin can change the estimate template', 'FORBIDDEN');
@@ -988,6 +1028,11 @@ function estimateStatus_(user, estimateNo, status) {
   const rows = readTable_('Estimates');
   if (!canEditEstimate_(user, rows, estimateNo) && WRITE_ROLES.indexOf(user.role) < 0) throw err_('You cannot change this estimate', 'FORBIDDEN');
   setEstimateFields_(estimateNo, { status: status, updatedBy: user.email, updatedAt: new Date().toISOString() });
+  if (status === 'Approved') {
+    const latest = readTable_('Estimates').filter(function (r) { return r.estimateNo === estimateNo; }).sort(function (a, b) { return Number(b.version) - Number(a.version); })[0];
+    notify_('estimateApproved', readSettings_().notifications.managers.concat([estimateOwner_(rows, estimateNo)]), 'Estimate approved · ' + estimateNo + ' · ' + latest.clientName,
+      '<p>Estimate <b>' + esc_(estimateNo) + '</b> for <b>' + esc_(latest.clientName) + '</b> (' + inr_(latest.grandTotal) + ') was marked <b>Approved</b> by ' + esc_(user.name) + '.</p>');
+  }
   audit_(user, 'update', 'Estimates', estimateNo, 'Status ' + status);
   return { estimates: estimatesList_(user) };
 }
@@ -1152,6 +1197,202 @@ function authorizeDrive() {
 }
 
 // ---------------------------------------------------------------------------
+// Notifications (email via the script owner's Gmail). Each event can be turned
+// off in Settings → Notifications. Failures never block the action.
+// ---------------------------------------------------------------------------
+function esc_(v) {
+  return String(v === null || v === undefined ? '' : v).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; });
+}
+function inr_(n) {
+  return '₹' + (Number(n) || 0).toLocaleString('en-IN');
+}
+
+function notify_(event, to, subject, html) {
+  try {
+    const n = readSettings_().notifications;
+    if (!n.email || !n.events[event]) return;
+    const list = (to || []).map(function (x) { return String(x || '').trim().toLowerCase(); })
+      .filter(function (x, i, arr) { return /@/.test(x) && arr.indexOf(x) === i; });
+    if (!list.length) return;
+    const company = readSettings_().company.name || 'Urbane Living';
+    MailApp.sendEmail({
+      to: list.join(','), subject: company + ' · ' + subject, name: company,
+      htmlBody: '<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:560px">' + html +
+        '<p style="color:#888;font-size:12px;margin-top:24px">This is an automatic message from the ' + esc_(company) + ' dashboard.</p></div>',
+    });
+    audit_({ email: 'system' }, 'email', event, '', subject + ' → ' + list.join(', '));
+  } catch (e) {
+    audit_({ email: 'system' }, 'email failed', event, '', String(e && e.message || e).slice(0, 200));
+  }
+}
+
+function employeeEmail_(employeeId) {
+  const e = readTable_('Employees').filter(function (x) { return x.id === employeeId; })[0];
+  if (!e) return '';
+  const u = readTable_('Users').filter(function (x) { return x.employeeId === employeeId || String(x.name).toLowerCase() === String(e.name).toLowerCase(); })[0];
+  return (u && u.email) || e.email || '';
+}
+
+function notifyRecord_(table, r) {
+  if (table === 'SalaryPayments') {
+    notify_('salaryPaid', [employeeEmail_(r.employeeId)], 'Salary paid · ' + r.salaryMonth,
+      '<p>Your salary for <b>' + esc_(r.salaryMonth) + '</b> has been paid: <b>' + inr_(r.paidAmount) + '</b> on ' + esc_(r.paidDate) + (r.mode ? ' by ' + esc_(r.mode) : '') + '.</p>' +
+      '<p>Base ' + inr_(r.baseSalary) + ' + expenses ' + inr_(r.expenses) + ' − advances ' + inr_(r.advances) + (Number(r.deduction) ? ' − deduction ' + inr_(r.deduction) : '') + (Number(r.bonus) ? ' + bonus ' + inr_(r.bonus) : '') + '.</p>');
+  } else if (table === 'SalaryAdvances') {
+    notify_('advance', [employeeEmail_(r.employeeId)], 'Advance recorded · ' + inr_(r.amount),
+      '<p>An advance of <b>' + inr_(r.amount) + '</b> given on ' + esc_(r.date) + ' has been recorded. It will be deducted from your salary for <b>' + esc_(r.salaryMonth) + '</b>.</p>');
+  } else if (table === 'ClientPayments') {
+    const c = readTable_('Clients').filter(function (x) { return x.id === r.clientId; })[0] || {};
+    notify_('clientPayment', readSettings_().notifications.managers, 'Payment received · ' + inr_(r.amount) + ' · ' + (c.name || ''),
+      '<p><b>' + inr_(r.amount) + '</b> received from <b>' + esc_(c.name || '') + '</b> on ' + esc_(r.date) + (r.mode ? ' (' + esc_(r.mode) + ')' : '') + '.</p>');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rules & Guides — bilingual guides written by Admins in the app.
+// ---------------------------------------------------------------------------
+function guidesList_() {
+  return readTable_('Guides').map(function (g) {
+    let d = {};
+    try { d = JSON.parse(g.data || '{}'); } catch (e) { /* ignore */ }
+    return { id: g.id, sort: Number(g.sort) || 0, data: d, updatedBy: g.updatedBy, updatedAt: g.updatedAt };
+  }).sort(function (a, b) { return a.sort - b.sort; });
+}
+
+function guideSave_(user, guide) {
+  needRole_(user, ['Admin']);
+  guide = guide || {};
+  const data = guide.data || {};
+  if (!data.title || !(data.title.en || data.title.hi)) throw err_('Give the guide a title');
+  const json = JSON.stringify(data);
+  if (json.length > 45000) throw err_('This guide is too long — split it into two guides');
+  const now = new Date().toISOString();
+  const o = { sort: Number(guide.sort) || 0, category: String((data.category && (data.category.en || data.category.hi)) || '').slice(0, 60), title: String(data.title.en || data.title.hi).slice(0, 200), data: json, updatedBy: user.email, updatedAt: now };
+  if (guide.id && readTable_('Guides').some(function (g) { return g.id === guide.id; })) {
+    patchRow_('Guides', guide.id, o);
+    o.id = guide.id;
+  } else {
+    o.id = newId_('GD');
+    o.createdBy = user.email;
+    o.createdAt = now;
+    if (!guide.sort) o.sort = readTable_('Guides').length + 1;
+    appendObj_('Guides', o);
+  }
+  audit_(user, guide.id ? 'update' : 'create', 'Guides', o.id, o.title);
+  return { guides: guidesList_() };
+}
+
+function guideDelete_(user, id) {
+  needRole_(user, ['Admin']);
+  const sh = sheet_('Guides');
+  const values = sh.getDataRange().getValues();
+  const idCol = values[0].map(String).indexOf('id');
+  for (let i = values.length - 1; i >= 1; i--) if (String(values[i][idCol]) === id) { sh.deleteRow(i + 1); break; }
+  audit_(user, 'delete', 'Guides', id, '');
+  return { guides: guidesList_() };
+}
+
+// ---------------------------------------------------------------------------
+// Leave requests. Approvers come from Settings: scope "all" approves anyone,
+// scope "sales" only people whose designation mentions Sales.
+// ---------------------------------------------------------------------------
+const LEAVE_TYPES = ['Casual leave', 'Sick leave', 'Half day', 'Work from site', 'Other'];
+
+function canApproveLeave_(user, req) {
+  if (String(req.email).toLowerCase() === String(user.email).toLowerCase()) return false;
+  const me = String(user.email).toLowerCase();
+  return readSettings_().leaveApprovers.some(function (a) {
+    return a.email === me && (a.scope === 'all' || /sales/i.test(String(req.designation || '')));
+  });
+}
+
+function leaveDays_(from, to, type) {
+  if (type === 'Half day') return 0.5;
+  let n = 0;
+  const d = new Date(from + 'T00:00:00');
+  const end = new Date(to + 'T00:00:00');
+  while (d <= end && n < 400) {
+    if (d.getDay() !== 0) n++;
+    d.setDate(d.getDate() + 1);
+  }
+  return n;
+}
+
+function leaveList_(user) {
+  const me = String(user.email).toLowerCase();
+  return readTable_('LeaveRequests').filter(function (r) {
+    return user.role === 'Admin' || String(r.email).toLowerCase() === me || canApproveLeave_(user, r);
+  }).map(function (r) { r.canDecide = r.status === 'Pending' && canApproveLeave_(user, r); return r; });
+}
+
+function leaveSubmit_(user, rec) {
+  rec = rec || {};
+  const type = LEAVE_TYPES.indexOf(rec.type) >= 0 ? rec.type : 'Other';
+  const from = String(rec.fromDate || '');
+  const to = type === 'Half day' ? from : String(rec.toDate || rec.fromDate || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) throw err_('Choose valid dates');
+  const reason = String(rec.reason || '').trim().slice(0, 500);
+  if (!reason) throw err_('Write a reason');
+  const now = new Date().toISOString();
+  const o = {
+    id: newId_('LV'), email: user.email, name: user.name, designation: user.designation || '', type: type, fromDate: from, toDate: to,
+    days: leaveDays_(from, to, type), reason: reason, status: 'Pending', decidedBy: '', decidedAt: '', decisionNote: '',
+    createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now,
+  };
+  appendObj_('LeaveRequests', o);
+  audit_(user, 'create', 'LeaveRequests', o.id, type + ' ' + from + ' → ' + to);
+  const approvers = readSettings_().leaveApprovers.filter(function (a) { return a.email !== String(user.email).toLowerCase() && (a.scope === 'all' || /sales/i.test(o.designation)); }).map(function (a) { return a.email; });
+  notify_('leaveRequest', approvers, 'Leave request · ' + user.name + ' · ' + from + (to !== from ? ' to ' + to : ''),
+    '<p><b>' + esc_(user.name) + '</b> (' + esc_(o.designation) + ') has asked for <b>' + esc_(type) + '</b>: ' + from + (to !== from ? ' to ' + to : '') + ' (' + o.days + ' day' + (o.days === 1 ? '' : 's') + ').</p>' +
+    '<p>Reason: ' + esc_(reason) + '</p><p>Open the dashboard → Attendance → Leave to approve or reject.</p>');
+  return { leaves: leaveList_(user) };
+}
+
+function leaveDecide_(user, id, decision, note) {
+  if (['Approved', 'Rejected'].indexOf(decision) < 0) throw err_('Invalid decision');
+  const r = readTable_('LeaveRequests').filter(function (x) { return x.id === id; })[0];
+  if (!r) throw err_('Request not found');
+  if (r.status !== 'Pending') throw err_('This request was already ' + r.status.toLowerCase());
+  if (!canApproveLeave_(user, r)) throw err_('You cannot decide this request', 'FORBIDDEN');
+  const now = new Date().toISOString();
+  patchRow_('LeaveRequests', id, { status: decision, decidedBy: user.email, decidedAt: now, decisionNote: String(note || '').slice(0, 300), updatedBy: user.email, updatedAt: now });
+  if (decision === 'Approved') {
+    const d = new Date(r.fromDate + 'T00:00:00');
+    const end = new Date(r.toDate + 'T00:00:00');
+    const att = readTable_('Attendance');
+    while (d <= end) {
+      const ds = Utilities.formatDate(d, TZ, 'yyyy-MM-dd');
+      if (d.getDay() !== 0) {
+        const status = r.type === 'Half day' ? 'Half Day' : 'Leave';
+        const row = att.filter(function (a) { return a.date === ds && String(a.email).toLowerCase() === String(r.email).toLowerCase(); })[0];
+        const notes = r.type + ' approved by ' + user.name;
+        if (row) { if (r.type !== 'Half day') patchRow_('Attendance', row.id, { status: status, notes: notes, updatedBy: user.email, updatedAt: now }); }
+        else appendObj_('Attendance', { id: newId_('AT'), date: ds, email: r.email, name: r.name, checkIn: '', checkOut: '', ip: '', method: 'Leave', status: status, notes: notes, createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now });
+      }
+      d.setDate(d.getDate() + 1);
+    }
+  }
+  audit_(user, decision.toLowerCase(), 'LeaveRequests', id, r.name + ' ' + r.fromDate + ' → ' + r.toDate);
+  notify_('leaveDecision', [r.email], 'Leave ' + decision.toLowerCase() + ' · ' + r.fromDate + (r.toDate !== r.fromDate ? ' to ' + r.toDate : ''),
+    '<p>Hi ' + esc_(r.name) + ',</p><p>Your <b>' + esc_(r.type) + '</b> request for ' + r.fromDate + (r.toDate !== r.fromDate ? ' to ' + r.toDate : '') + ' was <b>' + decision.toLowerCase() + '</b> by ' + esc_(user.name) + '.</p>' +
+    (note ? '<p>Note: ' + esc_(note) + '</p>' : ''));
+  return { leaves: leaveList_(user) };
+}
+
+function leaveCancel_(user, id) {
+  const r = readTable_('LeaveRequests').filter(function (x) { return x.id === id; })[0];
+  if (!r || String(r.email).toLowerCase() !== String(user.email).toLowerCase()) throw err_('Request not found');
+  if (r.status !== 'Pending') throw err_('Only pending requests can be cancelled');
+  patchRow_('LeaveRequests', id, { status: 'Cancelled', updatedBy: user.email, updatedAt: new Date().toISOString() });
+  return { leaves: leaveList_(user) };
+}
+
+/** Run once from the editor after updating, so the script may send emails. */
+function authorizeEmail() {
+  Logger.log('Email quota left today: ' + MailApp.getRemainingDailyQuota());
+}
+
+// ---------------------------------------------------------------------------
 // Attendance — marked only from the office network (IP prefix) or, if
 // enabled, from within the office geofence. Times are India time.
 // ---------------------------------------------------------------------------
@@ -1213,6 +1454,10 @@ function attendanceMark_(user, req) {
         createdBy: user.email, createdAt: now.toISOString(), updatedBy: user.email, updatedAt: now.toISOString(),
       };
       appendObj_('Attendance', o);
+      if (o.status === 'Late') {
+        notify_('late', [user.email], 'Late check-in reminder · ' + time,
+          '<p>Hi ' + esc_(user.name) + ',</p><p>Your attendance today (' + date + ') was marked at <b>' + time + '</b>, after the office start time of <b>' + settings.attendance.startTime + '</b>.</p><p>Please try to reach the office on time.</p>');
+      }
       audit_(user, 'attendance', 'Attendance', o.id, 'Check-in ' + time + ' via ' + method);
       return { record: o, action: 'in' };
     }

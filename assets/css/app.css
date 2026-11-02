@@ -494,3 +494,9 @@ textarea.ainput { resize: vertical; display: block; }
   body.print-guide .content > *:not(.guide), body.print-guide .guide-check, body.print-guide .lang-switch, body.print-guide .guide-top .btn, body.print-guide .tabs, body.print-guide .page-head { display: none !important; }
   body.print-guide .guide-step { break-inside: avoid; opacity: 1; }
 }
+.nav-badge { margin-left: auto; background: var(--accent); color: var(--accent-text); border-radius: 999px; font-size: 11px; font-weight: 700; padding: 1px 7px; }
+.ge-pair { margin-bottom: 10px; }
+.ge-label { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.ge-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ge-step { margin: 12px 0; background: var(--surface-2); }
+@media (max-width: 640px) { .ge-cols { grid-template-columns: 1fr; } }

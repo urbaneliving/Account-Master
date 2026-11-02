@@ -425,6 +425,8 @@
     S.estimates = r.estimates || [];
     S.attendanceToday = r.attendanceToday || null;
     S.me = r.me || { employee: null };
+    S.guides = r.guides || [];
+    S.leaves = r.leaves || [];
   }
 
   async function saveRecord(table, record) {
@@ -814,7 +816,10 @@
     const u = S.user;
     $('#root').innerHTML = '<div class="shell">' +
       '<aside class="sidebar">' + brand() + '<nav class="nav">' +
-      NAV.filter((n) => !n[3] || seesAccounts()).map((n) => '<a href="#/' + n[0] + '" data-nav="' + n[0] + '">' + icon(n[2]) + '<span>' + n[1] + '</span></a>').join('') + '</nav>' +
+      NAV.filter((n) => !n[3] || seesAccounts()).map((n) => {
+        const badge = n[0] === 'attendance' ? (S.leaves || []).filter((r) => r.canDecide).length : 0;
+        return '<a href="#/' + n[0] + '" data-nav="' + n[0] + '">' + icon(n[2]) + '<span>' + n[1] + '</span>' + (badge ? '<span class="nav-badge">' + badge + '</span>' : '') + '</a>';
+      }).join('') + '</nav>' +
       '<div class="side-user"><a href="#/me" title="My account">' + avatar(u) + '</a><div class="who"><div style="font-weight:600">' + esc(u.name) + '</div><div class="small muted">' + esc(u.designation || u.role) + (DEMO ? ' · Demo' : '') + '</div></div>' +
       '<button class="btn ghost icon" title="Switch theme" data-act="theme">' + icon('moon') + '</button>' +
       '<button class="btn ghost icon" title="Log out" data-act="logout">' + icon('logout') + '</button></div>' +
@@ -2074,8 +2079,11 @@
       '<div class="small ' + (ips ? (inOffice ? 'pos' : 'neg') : 'muted') + '">' + (ips ? (inOffice ? '✓ On office network' : '✗ Not on office network') + ' · IP ' + esc(ips.list.join(', ') || 'unknown') : 'Checking your network…') + '</div></div></div>' +
       '<div class="page-actions">' + (!t ? '<button class="btn primary" data-act="att-mark" data-kind="in">Check in</button>' : '<button class="btn" data-act="att-mark" data-kind="out">Check out</button>') +
       (geoOn && !inOffice ? '<button class="btn" data-act="att-mark" data-kind="' + (t ? 'out' : 'in') + '" data-geo="1">Use my location</button>' : '') + '</div></div></div>';
-    if (team) h += tabs('attendance', [['me', 'My attendance'], ['today', 'Today'], ['team', 'Month']], 'me');
-    else st.tab = 'me';
+    const pendingForMe = (S.leaves || []).filter((r) => r.canDecide).length;
+    const leaveTab = ['leave', 'Leave', pendingForMe || undefined];
+    if (team) h += tabs('attendance', [['me', 'My attendance'], leaveTab, ['today', 'Today'], ['team', 'Month']], 'me');
+    else { if (st.tab !== 'leave') st.tab = 'me'; h += tabs('attendance', [['me', 'My attendance'], leaveTab], 'me'); }
+    if (st.tab === 'leave') return h + leaveHtml();
     if (st.tab === 'today') st.month = thisMonth();
     if (st.tab !== 'today') h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Month">' + (st.tab === 'team' ? '<button class="btn sm" data-act="att-csv">' + icon('download') + 'Export</button>' : '') + '</div>';
     const rowsM = S.attRows && S.attRows[st.month];
@@ -2538,14 +2546,14 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Guides (Settings → Guide) — content lives in assets/js/guides.js
+  // Rules & Guides (Settings) — stored in the sheet, written by Admins in the app
   // ---------------------------------------------------------------------------
   const GUIDE_UI = {
-    en: { search: 'Search guides…', steps: 'steps', need: 'What you need', done: 'done', of: 'of', mark: 'Mark as done', reset: 'Start over', print: 'Print', back: 'All guides', by: 'Prepared by', updated: 'Updated', call: 'Call', whatsapp: 'WhatsApp', email: 'Email', stuck: 'Stuck? Send a photo of the screen to', none: 'No guide matches your search', allDone: 'All steps done 🎉', progress: (d, n) => d + ' of ' + n + ' steps done' },
-    hi: { search: 'गाइड खोजिए…', steps: 'स्टेप', need: 'क्या चाहिए', done: 'पूरे', of: 'में से', mark: 'हो गया', reset: 'फिर से शुरू', print: 'प्रिंट', back: 'सभी गाइड', by: 'तैयार किया', updated: 'अपडेट', call: 'कॉल', whatsapp: 'WhatsApp', email: 'ईमेल', stuck: 'अटक गए? स्क्रीन की फ़ोटो भेजिए', none: 'कोई गाइड नहीं मिली', allDone: 'सारे स्टेप पूरे 🎉', progress: (d, n) => n + ' में से ' + d + ' स्टेप पूरे' },
+    en: { search: 'Search rules & guides…', steps: 'steps', need: 'What you need', done: 'done', mark: 'Mark as done', reset: 'Start over', print: 'Print', back: 'All rules & guides', by: 'Contact', updated: 'Updated', whatsapp: 'WhatsApp', stuck: 'Stuck? Send a photo of the screen to', none: 'No rules or guides yet', allDone: 'All steps done 🎉', progress: (d, n) => d + ' of ' + n + ' steps done' },
+    hi: { search: 'नियम और गाइड खोजिए…', steps: 'स्टेप', need: 'क्या चाहिए', done: 'पूरे', mark: 'हो गया', reset: 'फिर से शुरू', print: 'प्रिंट', back: 'सभी नियम और गाइड', by: 'संपर्क', updated: 'अपडेट', whatsapp: 'WhatsApp', stuck: 'अटक गए? स्क्रीन की फ़ोटो भेजिए', none: 'अभी कोई नियम या गाइड नहीं है', allDone: 'सारे स्टेप पूरे 🎉', progress: (d, n) => n + ' में से ' + d + ' स्टेप पूरे' },
   };
-  const guideLang = () => store.get('am_lang') === 'hi' ? 'hi' : 'en';
-  const tr = (o) => (o && typeof o === 'object' ? (o[guideLang()] || o.en || '') : (o || ''));
+  const guideLang = () => (store.get('am_lang') === 'hi' ? 'hi' : 'en');
+  const tr = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? (o[guideLang()] || o.en || o.hi || '') : (o || ''));
   function gfmt(text) {
     return esc(text)
       .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
@@ -2553,68 +2561,209 @@
       .replace(/\[\[(.+?)\]\]/g, '<kbd>$1</kbd>')
       .replace(/\b((?:[a-z0-9-]+\.)+(?:com|in|org|net)(?:\/[\w\-./]*)?)/gi, (m) => '<a href="https://' + m + '" target="_blank" rel="noopener">' + m + '</a>');
   }
+  function renumberSteps() { $$('#ge-steps [data-step] .card-body > div:first-child b').forEach((b, k) => { b.textContent = 'Step ' + (k + 1); }); }
   function guideProgress(id) {
     try { return JSON.parse(store.get('am_guide_' + id) || '[]'); } catch (e) { return []; }
   }
+  const phonesOf = (u) => String((u && u.phone) || '').split(/[,/;]+/).map((x) => x.replace(/[^\d+]/g, '')).filter((x) => x.length >= 10);
 
   function guideHtml() {
-    const guides = window.UL_GUIDES || [];
+    const guides = S.guides || [];
     const st = ui('guide');
     const L = GUIDE_UI[guideLang()];
     const langSwitch = '<div class="lang-switch" role="group" aria-label="Language">' +
       [['en', 'English'], ['hi', 'हिंदी']].map((x) => '<button type="button" data-act="guide-lang" data-id="' + x[0] + '" class="' + (guideLang() === x[0] ? 'active' : '') + '">' + x[1] + '</button>').join('') + '</div>';
-    const g = guides.find((x) => x.id === st.open) || (guides.length === 1 ? guides[0] : null);
-    if (!g) {
+    const G = guides.find((x) => x.id === st.open);
+    if (!G) {
       const q = (st.q || '').toLowerCase();
-      const list = guides.filter((x) => !q || (tr(x.title) + ' ' + tr(x.summary) + ' ' + x.title.en).toLowerCase().includes(q));
-      return '<div class="guide-top"><input class="input search" type="search" data-guide-q placeholder="' + esc(L.search) + '" value="' + esc(st.q || '') + '">' + langSwitch + '</div>' +
-        (list.length ? '<div class="guide-cards">' + list.map((x) => {
-          const pr = guideProgress(x.id).length;
-          return '<a href="#" class="card guide-card" data-act="guide-open" data-id="' + esc(x.id) + '"><div class="gi">' + (x.icon || '📘') + '</div><div><div class="badge">' + esc(tr(x.category)) + '</div>' +
-            '<h2 style="margin:6px 0 4px">' + esc(tr(x.title)) + '</h2><div class="small muted">' + esc(tr(x.summary)) + '</div>' +
-            '<div class="small" style="margin-top:8px">' + x.steps.length + ' ' + L.steps + (pr ? ' · ' + pr + ' ' + L.done : '') + '</div></div></a>';
-        }).join('') + '</div>' : '<div class="empty">' + L.none + '</div>');
+      const list = guides.filter((x) => !q || JSON.stringify(x.data).toLowerCase().includes(q));
+      const missing = (window.UL_GUIDE_TEMPLATES || []).filter((t) => !guides.some((g) => g.data.title && g.data.title.en === t.title.en));
+      let h = '<div class="guide-top"><input class="input search" type="search" data-guide-q placeholder="' + esc(L.search) + '" value="' + esc(st.q || '') + '">' + langSwitch +
+        (isAdmin() ? '<button class="btn primary" data-act="guide-edit" data-id="">' + icon('plus') + 'New rule / guide</button>' : '') + '</div>';
+      if (isAdmin() && missing.length) h += '<div class="notice" style="margin:0 0 14px">Starter guide available: ' + missing.map((t, i) => '<a href="#" data-act="guide-starter" data-id="' + i + '"><b>' + esc(t.title.en) + '</b></a>').join(', ') + ' — click to add it, then edit it as you like.</div>';
+      h += list.length ? '<div class="guide-cards">' + list.map((x) => {
+        const d = x.data;
+        const pr = guideProgress(x.id).length;
+        return '<a href="#" class="card guide-card" data-act="guide-open" data-id="' + esc(x.id) + '"><div class="gi">' + esc(d.icon || '📘') + '</div><div><div class="badge">' + esc(tr(d.category)) + '</div>' +
+          '<h2 style="margin:6px 0 4px">' + esc(tr(d.title)) + '</h2><div class="small muted">' + esc(tr(d.summary)) + '</div>' +
+          '<div class="small" style="margin-top:8px">' + (d.steps || []).length + ' ' + L.steps + (pr ? ' · ' + pr + ' ' + L.done : '') + '</div></div></a>';
+      }).join('') + '</div>' : '<div class="empty">' + L.none + '</div>';
+      return h;
     }
-    const done = guideProgress(g.id);
-    const pct = Math.round(done.length / g.steps.length * 100);
-    const a = g.author || {};
-    let h = '<div class="guide no-print-shell">';
-    h += '<div class="guide-top">' + (guides.length > 1 ? '<a href="#" class="back" data-act="guide-open" data-id="">' + icon('back') + L.back + '</a>' : '<span></span>') +
-      '<div class="sp">' + langSwitch + '<button class="btn sm" data-act="guide-print">' + icon('print') + L.print + '</button></div></div>';
-    h += '<div class="card guide-head"><div class="card-body"><div class="badge accent">' + esc(tr(g.category)) + ' · ' + L.updated + ' ' + esc(g.updated || '') + '</div>' +
-      '<h1 style="margin:10px 0 6px">' + (g.icon ? g.icon + ' ' : '') + esc(tr(g.title)) + '</h1><p class="muted" style="margin:0">' + gfmt(tr(g.summary)) + '</p>';
-    if (g.needs && g.needs.length) h += '<div class="small muted" style="margin:14px 0 6px">' + L.need + '</div><div class="guide-needs">' + g.needs.map((n) => '<span>' + (n.icon || '') + ' ' + esc(tr(n)) + '</span>').join('') + '</div>';
-    if (a.name) {
-      h += '<div class="guide-author"><div><div class="small muted">' + L.by + '</div><b>' + esc(a.name) + '</b> · ' + esc(a.role || '') + '</div><div class="sp">' +
-        (a.phones || []).map((ph) => '<a class="btn sm" href="tel:+91' + esc(ph) + '">📞 ' + esc(ph) + '</a>').join('') +
-        (a.phones && a.phones[0] ? '<a class="btn sm" href="https://wa.me/91' + esc(a.phones[0]) + '" target="_blank" rel="noopener">💬 ' + L.whatsapp + '</a>' : '') +
-        (a.email ? '<a class="btn sm" href="mailto:' + esc(a.email) + '">✉️ ' + esc(a.email) + '</a>' : '') + '</div></div>';
+    const g = G.data;
+    const steps = g.steps || [];
+    const done = guideProgress(G.id);
+    const pct = steps.length ? Math.round(done.length / steps.length * 100) : 0;
+    const a = g.contact ? S.users.find((u) => String(u.email).toLowerCase() === String(g.contact).toLowerCase()) : null;
+    const phones = phonesOf(a);
+    let h = '<div class="guide">';
+    h += '<div class="guide-top"><a href="#" class="back" data-act="guide-open" data-id="">' + icon('back') + L.back + '</a>' +
+      '<div class="sp">' + langSwitch + (isAdmin() ? '<button class="btn sm" data-act="guide-edit" data-id="' + esc(G.id) + '">' + icon('edit') + 'Edit</button><button class="btn sm danger" data-act="guide-del" data-id="' + esc(G.id) + '">' + icon('trash') + '</button>' : '') +
+      '<button class="btn sm" data-act="guide-print">' + icon('print') + L.print + '</button></div></div>';
+    h += '<div class="card guide-head"><div class="card-body"><div class="badge accent">' + esc(tr(g.category)) + (g.updated ? ' · ' + L.updated + ' ' + esc(g.updated) : '') + '</div>' +
+      '<h1 style="margin:10px 0 6px">' + (g.icon ? esc(g.icon) + ' ' : '') + esc(tr(g.title)) + '</h1><p class="muted" style="margin:0">' + gfmt(tr(g.summary)) + '</p>';
+    if (g.needs && g.needs.length) h += '<div class="small muted" style="margin:14px 0 6px">' + L.need + '</div><div class="guide-needs">' + g.needs.map((n) => '<span>' + esc(n.icon || '') + ' ' + esc(tr(n)) + '</span>').join('') + '</div>';
+    if (a) {
+      h += '<div class="guide-author"><div style="display:flex;gap:10px;align-items:center">' + avatar(a, 36) + '<div><div class="small muted">' + L.by + '</div><b>' + esc(a.name) + '</b> · ' + esc(a.designation || '') + '</div></div><div class="sp">' +
+        phones.map((ph) => '<a class="btn sm" href="tel:' + (ph.startsWith('+') ? ph : '+91' + ph.slice(-10)) + '">📞 ' + esc(ph) + '</a>').join('') +
+        (phones[0] ? '<a class="btn sm" href="https://wa.me/91' + esc(phones[0].slice(-10)) + '" target="_blank" rel="noopener">💬 ' + L.whatsapp + '</a>' : '') +
+        '<a class="btn sm" href="mailto:' + esc(a.email) + '">✉️ ' + esc(a.email) + '</a></div></div>';
     }
-    h += '<div class="guide-progress"><div class="bar"><i style="width:' + pct + '%"></i></div><span class="small">' + (done.length === g.steps.length ? L.allDone : L.progress(done.length, g.steps.length)) + '</span>' +
-      (done.length ? '<button class="btn ghost sm" data-act="guide-reset" data-id="' + esc(g.id) + '">' + L.reset + '</button>' : '') + '</div></div></div>';
-
-    g.steps.forEach((s, i) => {
+    if (steps.length > 1) {
+      h += '<div class="guide-progress"><div class="bar"><i style="width:' + pct + '%"></i></div><span class="small">' + (done.length === steps.length ? L.allDone : L.progress(done.length, steps.length)) + '</span>' +
+        (done.length ? '<button class="btn ghost sm" data-act="guide-reset" data-id="' + esc(G.id) + '">' + L.reset + '</button>' : '') + '</div>';
+    }
+    h += '</div></div>';
+    steps.forEach((s, i) => {
       const isDone = done.includes(i);
       h += '<div class="card guide-step' + (isDone ? ' done' : '') + '"><div class="card-body"><div class="gs-head"><div class="gs-num">' + (isDone ? '✓' : i + 1) + '</div>' +
-        '<h2>' + esc(tr(s.title)) + '</h2>' + (s.tag ? '<span class="badge">' + esc(tr(s.tag)) + '</span>' : '') + '</div>';
-      h += '<ol class="gs-list">' + s.items.map((it) => '<li>' + gfmt(tr(it)) + '</li>').join('') + '</ol>';
-      if (s.keys) {
-        h += '<div class="small muted" style="margin:10px 0 6px">' + esc(tr(s.keys.title)) + '</div><div class="guide-keys">' +
-          s.keys.rows.map((k) => '<span class="' + (k[2] ? 'hl' : '') + '"><kbd>' + esc(k[0]) + '</kbd> ' + esc(k[1]) + '</span>').join('') + '</div>';
-      }
-      if (s.table) {
-        h += '<div class="table-wrap" style="margin-top:12px"><table class="data cards"><thead><tr>' + tr(s.table.head).map((x) => '<th>' + esc(x) + '</th>').join('') + '</tr></thead><tbody>' +
-          s.table.rows.map((r) => '<tr>' + r.map((c, j) => {
-            const label = tr(s.table.head)[j];
-            if (j === r.length - 1) return '<td data-label="' + esc(label) + '"><span class="badge ' + (c === 'delete' ? 'bad' : 'good') + '">' + esc(tr(s.table.actions[c])) + '</span></td>';
-            return '<td data-label="' + esc(label) + '"' + (j === 0 ? ' class="primary-cell"' : '') + '>' + esc(tr(c)) + '</td>';
+        '<h2>' + esc(tr(s.title)) + '</h2>' + (tr(s.tag) ? '<span class="badge">' + esc(tr(s.tag)) + '</span>' : '') + '</div>';
+      const items = (s.items || []).map(tr).filter(Boolean);
+      if (items.length) h += '<ol class="gs-list">' + items.map((it) => '<li>' + gfmt(it) + '</li>').join('') + '</ol>';
+      const t = s.table && (s.table[guideLang()] && s.table[guideLang()].length ? s.table[guideLang()] : s.table.en);
+      if (t && t.length > 1) {
+        const head = t[0];
+        h += '<div class="table-wrap" style="margin-top:12px"><table class="data cards"><thead><tr>' + head.map((x) => '<th>' + esc(x) + '</th>').join('') + '</tr></thead><tbody>' +
+          t.slice(1).map((r) => '<tr>' + r.map((c, j) => {
+            const cls = /^(delete|हटाइए)$/i.test(c) ? 'bad' : /^(don'?t touch|keep|मत छेड़िए)$/i.test(c) ? 'good' : '';
+            return '<td data-label="' + esc(head[j] || '') + '"' + (j === 0 ? ' class="primary-cell"' : '') + '>' + (cls ? '<span class="badge ' + cls + '">' + esc(c) + '</span>' : gfmt(c)) + '</td>';
           }).join('') + '</tr>').join('') + '</tbody></table></div>';
       }
-      if (s.note) h += '<div class="guide-note ' + (s.note.type || 'info') + '">' + ({ warn: '⚠️', danger: '⛔', info: 'ℹ️' }[s.note.type] || 'ℹ️') + ' ' + gfmt(tr(s.note)) + '</div>';
-      h += '<div style="margin-top:12px"><label class="guide-check"><input type="checkbox" data-guide-step="' + esc(g.id) + '|' + i + '"' + (isDone ? ' checked' : '') + '> ' + L.mark + '</label></div></div></div>';
+      if (s.note && tr(s.note)) h += '<div class="guide-note ' + (s.note.type || 'info') + '">' + ({ warn: '⚠️', danger: '⛔', info: 'ℹ️' }[s.note.type] || 'ℹ️') + ' ' + gfmt(tr(s.note)) + '</div>';
+      if (steps.length > 1) h += '<div style="margin-top:12px"><label class="guide-check"><input type="checkbox" data-guide-step="' + esc(G.id) + '|' + i + '"' + (isDone ? ' checked' : '') + '> ' + L.mark + '</label></div>';
+      h += '</div></div>';
     });
-    if (a.name) h += '<p class="small muted" style="text-align:center">' + L.stuck + ' <b>' + esc(a.name) + '</b>' + (a.phones && a.phones[0] ? ' · ' + esc(a.phones.join(' / ')) : '') + '</p>';
+    if (a) h += '<p class="small muted" style="text-align:center">' + L.stuck + ' <b>' + esc(a.name) + '</b>' + (phones.length ? ' · ' + esc(phones.join(' / ')) : '') + '</p>';
     return h + '</div>';
+  }
+
+  // ----- Guide editor (Admin): English and Hindi side by side -----
+  const lines = (t) => String(t || '').split('\n').map((x) => x.trim()).filter(Boolean);
+  const tableText = (rows) => (rows || []).map((r) => r.join(' | ')).join('\n');
+  const parseTable = (t) => lines(t).map((l) => l.split('|').map((c) => c.trim()));
+  function pairField(label, name, en, hi, area, hint) {
+    const tag = (lang, v) => area ? '<textarea class="input" name="' + name + '_' + lang + '" rows="' + area + '">' + esc(v || '') + '</textarea>' : '<input class="input" name="' + name + '_' + lang + '" value="' + esc(v || '') + '">';
+    return '<div class="ge-pair"><div class="ge-label">' + label + (hint ? '<span class="field-hint"> · ' + hint + '</span>' : '') + '</div><div class="ge-cols"><label class="field">English' + tag('en', en) + '</label><label class="field">हिंदी' + tag('hi', hi) + '</label></div></div>';
+  }
+  function stepEditor(s, i) {
+    s = s || {};
+    const items = s.items || [];
+    return '<div class="card ge-step" data-step><div class="card-body"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b>Step ' + (i + 1) + '</b>' +
+      '<span class="sp"><button type="button" class="btn ghost sm" data-act="ge-up">↑</button><button type="button" class="btn ghost sm" data-act="ge-down">↓</button><button type="button" class="btn ghost sm danger" data-act="ge-remove">' + icon('trash') + '</button></span></div>' +
+      pairField('Step title', 's_title', s.title && s.title.en, s.title && s.title.hi) +
+      pairField('Tag', 's_tag', s.tag && s.tag.en, s.tag && s.tag.hi, 0, 'optional, e.g. Target PC · 15–30 min') +
+      pairField('Points', 's_items', items.map((x) => x.en || '').join('\n'), items.map((x) => x.hi || '').join('\n'), 5, 'one point per line, same order in both languages') +
+      pairField('Table', 's_table', tableText(s.table && s.table.en), tableText(s.table && s.table.hi), 3, 'optional · one row per line, columns split by | · first line is the heading') +
+      '<div class="ge-pair"><div class="ge-label">Note box</div><select class="input" name="s_notetype" style="max-width:220px">' +
+      [['', 'No note'], ['info', 'ℹ️ Info'], ['warn', '⚠️ Warning'], ['danger', '⛔ Danger']].map((o) => '<option value="' + o[0] + '"' + ((s.note && s.note.type || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select></div>' +
+      pairField('Note text', 's_note', s.note && s.note.en, s.note && s.note.hi, 2) + '</div></div>';
+  }
+  function openGuideEditor(id, preset) {
+    const G = (S.guides || []).find((x) => x.id === id);
+    const g = preset || (G ? clone(G.data) : { icon: '📘', category: { en: 'Rules', hi: 'नियम' }, steps: [{}] });
+    const needs = g.needs || [];
+    const body = '<div class="ge">' +
+      '<div class="form-grid"><label class="field">Icon (emoji)<input class="input" name="icon" value="' + esc(g.icon || '') + '" maxlength="4"></label>' +
+      '<label class="field">Contact person<select class="input" name="contact"><option value="">—</option>' + S.users.filter((u) => u.status === 'Active').map((u) => '<option value="' + esc(u.email) + '"' + (u.email === g.contact ? ' selected' : '') + '>' + esc(u.name + (u.designation ? ' · ' + u.designation : '')) + '</option>').join('') + '</select><span class="field-hint">Their mobile from Settings → Members is shown with call / WhatsApp buttons</span></label></div>' +
+      pairField('Category', 'category', g.category && g.category.en, g.category && g.category.hi, 0, 'e.g. Rules, IT, Office') +
+      pairField('Title', 'title', g.title && g.title.en, g.title && g.title.hi) +
+      pairField('Short description', 'summary', g.summary && g.summary.en, g.summary && g.summary.hi, 2) +
+      pairField('What you need', 'needs', needs.map((n) => (n.icon ? n.icon + ' ' : '') + (n.en || '')).join('\n'), needs.map((n) => n.hi || '').join('\n'), 3, 'optional, one per line') +
+      '<p class="small muted">Formatting: **bold**, `C:\\path`, [[Enter]] for a key. Links like microsoft.com become clickable.</p>' +
+      '<div id="ge-steps">' + (g.steps || []).map(stepEditor).join('') + '</div>' +
+      '<button type="button" class="btn" data-act="ge-add">' + icon('plus') + 'Add step / section</button></div>';
+    openModal(G ? 'Edit · ' + tr(g.title) : 'New rule / guide', body, {
+      wide: true,
+      submit: 'Save',
+      onSubmit: async (f) => {
+        const v = (n) => (f.elements[n] ? f.elements[n].value.trim() : '');
+        const pair = (n) => ({ en: v(n + '_en'), hi: v(n + '_hi') });
+        const needEn = lines(v('needs_en'));
+        const needHi = lines(v('needs_hi'));
+        const data = {
+          icon: v('icon'), contact: v('contact'), category: pair('category'), title: pair('title'), summary: pair('summary'),
+          updated: new Date().toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }),
+          needs: needEn.map((x, k) => { const m = x.match(/^(\p{Extended_Pictographic}\uFE0F?)\s*(.*)$/u); return { icon: m ? m[1] : '', en: m ? m[2] : x, hi: needHi[k] || '' }; }),
+          steps: $$('[data-step]', f).map((el) => {
+            const q = (n) => $('[name=' + n + ']', el).value.trim();
+            const en = lines(q('s_items_en'));
+            const hi = lines(q('s_items_hi'));
+            const step = { title: { en: q('s_title_en'), hi: q('s_title_hi') }, tag: { en: q('s_tag_en'), hi: q('s_tag_hi') }, items: Array.from({ length: Math.max(en.length, hi.length) }, (_, k) => ({ en: en[k] || '', hi: hi[k] || '' })) };
+            const te = parseTable(q('s_table_en'));
+            const th = parseTable(q('s_table_hi'));
+            if (te.length || th.length) step.table = { en: te, hi: th };
+            if (q('s_notetype') && (q('s_note_en') || q('s_note_hi'))) step.note = { type: q('s_notetype'), en: q('s_note_en'), hi: q('s_note_hi') };
+            return step;
+          }).filter((x) => x.title.en || x.title.hi || x.items.length),
+        };
+        if (!data.title.en && !data.title.hi) throw new Error('Give it a title');
+        const r = await api('guideSave', { guide: { id: G ? G.id : '', sort: G ? G.sort : 0, data: data } });
+        S.guides = r.guides;
+        if (!G) ui('guide').open = (r.guides.find((x) => x.data.title.en === data.title.en && x.data.title.hi === data.title.hi) || {}).id;
+        toast('Saved');
+        renderPage();
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Leave requests (Attendance → Leave)
+  // ---------------------------------------------------------------------------
+  const LEAVE_TYPES = ['Casual leave', 'Sick leave', 'Half day', 'Work from site', 'Other'];
+  function leaveDates(r) { return fmtDate(r.fromDate) + (r.toDate && r.toDate !== r.fromDate ? ' → ' + fmtDate(r.toDate) : ''); }
+  function leaveHtml() {
+    const all = S.leaves || [];
+    const mine = all.filter((r) => String(r.email).toLowerCase() === myEmail());
+    const toDecide = all.filter((r) => r.canDecide);
+    const others = all.filter((r) => String(r.email).toLowerCase() !== myEmail() && !r.canDecide);
+    let h = '<div class="filters"><button class="btn primary" data-act="leave-new">' + icon('plus') + 'Request leave</button></div>';
+    if (toDecide.length) {
+      h += '<h2 style="margin:4px 0 10px">Waiting for your approval</h2>' + toDecide.map((r) => {
+        const u = S.users.find((x) => String(x.email).toLowerCase() === String(r.email).toLowerCase()) || { name: r.name };
+        return '<div class="card" style="margin-bottom:10px"><div class="card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">' + avatar(u, 40) +
+          '<div style="flex:1;min-width:200px"><b>' + esc(r.name) + '</b> <span class="muted small">' + esc(r.designation || '') + '</span><div>' + statusBadge(r.type === 'Half day' ? 'Half Day' : 'Leave') + ' ' + esc(r.type) + ' · <b>' + esc(leaveDates(r)) + '</b> · ' + r.days + ' day' + (num(r.days) === 1 ? '' : 's') + '</div>' +
+          '<div class="small muted">' + esc(r.reason) + ' · asked ' + esc(fmtStamp(r.createdAt)) + '</div></div>' +
+          '<div class="sp"><button class="btn primary" data-act="leave-decide" data-id="' + esc(r.id) + '" data-d="Approved">Approve</button><button class="btn danger" data-act="leave-decide" data-id="' + esc(r.id) + '" data-d="Rejected">Reject</button></div></div></div>';
+      }).join('');
+    }
+    const cols = (withName) => [
+      ...(withName ? [{ k: 'name', l: 'Name', primary: true, f: (r) => '<b>' + esc(r.name) + '</b><div class="cell-sub">' + esc(r.designation || '') + '</div>' }] : []),
+      { k: 'fromDate', l: 'Dates', primary: !withName, f: (r) => '<b>' + esc(leaveDates(r)) + '</b><div class="cell-sub">' + esc(r.type) + ' · ' + r.days + ' day' + (num(r.days) === 1 ? '' : 's') + '</div>' },
+      { k: 'reason', l: 'Reason', f: (r) => esc(r.reason) },
+      { k: 'status', l: 'Status', f: (r) => statusBadge(r.status) + (r.decidedBy ? '<div class="cell-sub">by ' + esc(userName(r.decidedBy)) + (r.decisionNote ? ' · ' + esc(r.decisionNote) : '') + '</div>' : '') },
+    ];
+    h += '<h2 style="margin:16px 0 10px">My requests</h2><div class="card">' + dataTable('leave-mine', cols(false), mine, {
+      sort: { k: 'fromDate', dir: 'desc' }, empty: 'No leave requests yet',
+    }) + '</div>';
+    if (mine.some((r) => r.status === 'Pending')) h += '<p class="small muted">' + mine.filter((r) => r.status === 'Pending').map((r) => '<a href="#" data-act="leave-cancel" data-id="' + esc(r.id) + '">Cancel request for ' + esc(leaveDates(r)) + '</a>').join(' · ') + '</p>';
+    if (others.length) h += '<h2 style="margin:16px 0 10px">Team requests</h2><div class="card">' + dataTable('leave-team', cols(true), others, { sort: { k: 'fromDate', dir: 'desc' } }) + '</div>';
+    const ap = (S.settings.leaveApprovers || []).map((a) => userName(a.email) + (a.scope === 'sales' ? ' (sales team)' : '')).join(', ');
+    if (ap) h += '<p class="small muted">Approvers: ' + esc(ap) + '. Approved days are added to attendance as Leave / Half day automatically.</p>';
+    return h;
+  }
+  function approverRow(a, i) {
+    return '<div class="sp" data-apv style="width:100%"><select class="input" name="apv_email" style="flex:1;min-width:180px"><option value="">—</option>' +
+      S.users.filter((u) => u.status === 'Active').map((u) => '<option value="' + esc(u.email) + '"' + (String(u.email).toLowerCase() === String(a.email).toLowerCase() ? ' selected' : '') + '>' + esc(u.name + (u.designation ? ' · ' + u.designation : '')) + '</option>').join('') +
+      (a.email && !S.users.some((u) => String(u.email).toLowerCase() === String(a.email).toLowerCase()) ? '<option value="' + esc(a.email) + '" selected>' + esc(a.email) + ' (not a member yet)</option>' : '') +
+      '</select><select class="input" name="apv_scope" style="width:auto"><option value="all"' + (a.scope !== 'sales' ? ' selected' : '') + '>Everyone</option><option value="sales"' + (a.scope === 'sales' ? ' selected' : '') + '>Sales team only</option></select>' +
+      '<button type="button" class="btn ghost sm icon danger" data-act="apv-del">' + icon('trash') + '</button></div>';
+  }
+  function openLeaveForm() {
+    openModal('Request leave', '<div class="form-grid">' +
+      '<label class="field">Type<select class="input" name="type">' + LEAVE_TYPES.map((t) => '<option>' + t + '</option>').join('') + '</select></label><span></span>' +
+      '<label class="field">From<input class="input" type="date" name="fromDate" value="' + today() + '"></label>' +
+      '<label class="field" data-to>To<input class="input" type="date" name="toDate" value="' + today() + '"></label>' +
+      '<label class="field full">Reason<textarea class="input" name="reason" rows="3" placeholder="e.g. Family function, fever"></textarea></label></div>', {
+      submit: 'Send request',
+      onSubmit: async (f) => {
+        const r = await api('leaveSubmit', { record: { type: f.type.value, fromDate: f.fromDate.value, toDate: f.type.value === 'Half day' ? f.fromDate.value : f.toDate.value, reason: f.reason.value } });
+        S.leaves = r.leaves;
+        toast('Leave request sent');
+        renderPage();
+      },
+    });
+    const f = $('#modal-root form');
+    f.type.addEventListener('change', () => { $('[data-to]', f).classList.toggle('hidden', f.type.value === 'Half day'); });
   }
 
   // ---------------------------------------------------------------------------
@@ -2627,9 +2776,9 @@
 
   function viewSettings() {
     const st = ui('settings');
-    const items = [['profile', 'My profile'], ['guide', 'Guide']];
+    const items = [['profile', 'My profile'], ['guide', 'Rules & Guides']];
     if (canWrite()) items.push(['lists', 'Dropdown lists'], ['duplicates', 'Duplicates', findDuplicates().length]);
-    if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['attendance', 'Attendance'], ['import', 'Import data'], ['activity', 'Activity log']);
+    if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['attendance', 'Attendance'], ['notifications', 'Notifications'], ['import', 'Import data'], ['activity', 'Activity log']);
     if (!items.some((i) => i[0] === st.tab)) st.tab = 'profile';
     let h = pageHead('Settings', '');
     h += tabs('settings', items, 'profile');
@@ -2673,6 +2822,28 @@
         f('estimatePrefix', 'Estimate number prefix', 'Number = prefix + month + day + counter, e.g. RFIUL1101227') + f('estimateValidDays', 'Valid for (days)', '', 'number') +
         '<label class="field">Last estimate counter<input class="input" name="estimateCounter" type="number" value="' + esc(S.settings.estimateCounter) + '"><span class="field-hint">The next estimate gets this + 1. Set it above the last number used on the old estimate page.</span></label>' +
         (S.settings.estimateTemplate ? '<button type="button" class="btn sm" data-act="tpl-reset" style="align-self:flex-start">Reset estimate template to default</button>' : '') +
+        '</div></div></div><button class="btn primary" type="submit">Save</button></form>';
+    } else if (st.tab === 'notifications') {
+      const n = S.settings.notifications || { events: {}, managers: [] };
+      const EV = [
+        ['late', 'Late check-in reminder', 'to the employee who came late'],
+        ['leaveRequest', 'New leave request', 'to the approvers'],
+        ['leaveDecision', 'Leave approved / rejected', 'to the employee'],
+        ['salaryPaid', 'Salary paid', 'to the employee, with the breakdown'],
+        ['advance', 'Advance recorded', 'to the employee'],
+        ['clientPayment', 'Payment received from a client', 'to the managers below'],
+        ['estimateApproved', 'Estimate approved', 'to the managers below and whoever made it'],
+      ];
+      const apv = S.settings.leaveApprovers || [];
+      h += '<form id="notif-form"><div class="two-col"><div class="card"><div class="card-head"><h2>Email notifications</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:12px">' +
+        '<label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" name="email"' + (n.email ? ' checked' : '') + '> Send emails</label>' +
+        EV.map((x) => '<label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" name="ev_' + x[0] + '"' + (n.events[x[0]] ? ' checked' : '') + ' style="margin-top:3px"><span>' + x[1] + '<div class="small muted">' + x[2] + '</div></span></label>').join('') +
+        '<label class="field">Managers (get business emails)<textarea class="input" name="managers" rows="3">' + esc((n.managers || []).join('\n')) + '</textarea><span class="field-hint">One email per line</span></label>' +
+        '<p class="small muted" style="margin:0">Emails are sent from the Google account that owns the Apps Script (Gmail limit: about 100 a day on a free account, 1,500 on Google Workspace).</p>' +
+        '</div></div><div class="card"><div class="card-head"><h2>Leave approvers</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:10px">' +
+        '<div id="apv-list">' + apv.map((a, i) => approverRow(a, i)).join('') + '</div><button type="button" class="btn sm" data-act="apv-add" style="align-self:flex-start">' + icon('plus') + 'Add approver</button>' +
+        '<p class="small muted" style="margin:0">“Sales team only” approves requests from people whose designation contains “Sales”. Nobody can approve their own request.</p>' +
+        '<div class="notice" style="margin-top:6px"><b>SMS &amp; WhatsApp:</b> these need a paid provider account (for example WhatsApp Business Cloud API or an Indian SMS gateway such as MSG91). Once you have one, share the details and they can be added next to email.</div>' +
         '</div></div></div><button class="btn primary" type="submit">Save</button></form>';
     } else if (st.tab === 'duplicates') {
       h += duplicatesHtml();
@@ -2733,6 +2904,20 @@
           const r = await api('saveSettings', { settings: { company: company, estimateCounter: fd.estimateCounter.value } });
           S.settings = r.settings;
           toast('Company settings saved');
+        } catch (ex) { toast(ex.message, true); }
+      });
+    }
+    if (st.tab === 'notifications') {
+      $('#notif-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = e.target.elements;
+        const events = {};
+        Object.keys(S.settings.notifications.events).forEach((k) => { events[k] = !!(fd['ev_' + k] && fd['ev_' + k].checked); });
+        const approvers = $$('#apv-list [data-apv]').map((r) => ({ email: $('select[name=apv_email]', r).value, scope: $('select[name=apv_scope]', r).value })).filter((a) => a.email);
+        try {
+          const r = await api('saveSettings', { settings: { notifications: { email: fd.email.checked, events: events, managers: fd.managers.value.split('\n').map((x) => x.trim()).filter(Boolean) }, leaveApprovers: approvers } });
+          S.settings = r.settings;
+          toast('Notification settings saved');
         } catch (ex) { toast(ex.message, true); }
       });
     }
@@ -2986,8 +3171,34 @@
         } catch (err) { toast(err.message, true); }
         break;
       case 'dup-run': runDuplicates(el); break;
+      case 'leave-new': openLeaveForm(); break;
+      case 'apv-add': $('#apv-list').insertAdjacentHTML('beforeend', approverRow({ email: '', scope: 'all' })); break;
+      case 'apv-del': el.closest('[data-apv]').remove(); break;
+      case 'leave-cancel':
+        e.preventDefault();
+        if (!confirm('Cancel this leave request?')) break;
+        try { const r = await api('leaveCancel', { id: el.dataset.id }); S.leaves = r.leaves; toast('Request cancelled'); renderPage(); } catch (err) { toast(err.message, true); }
+        break;
+      case 'leave-decide': {
+        const d = el.dataset.d;
+        const note = d === 'Rejected' ? prompt('Reason for rejecting (sent to the employee):') : '';
+        if (note === null) break;
+        el.disabled = true;
+        try { const r = await api('leaveDecide', { id: el.dataset.id, decision: d, note: note || '' }); S.leaves = r.leaves; S.attRows = {}; toast('Leave ' + d.toLowerCase()); renderPage(); } catch (err) { toast(err.message, true); el.disabled = false; }
+        break;
+      }
       case 'guide-lang': store.set('am_lang', el.dataset.id); renderPage(); break;
       case 'guide-open': e.preventDefault(); ui('guide').open = el.dataset.id; renderPage(); window.scrollTo(0, 0); break;
+      case 'guide-edit': openGuideEditor(el.dataset.id); break;
+      case 'guide-starter': e.preventDefault(); openGuideEditor('', clone(window.UL_GUIDE_TEMPLATES[Number(el.dataset.id)])); break;
+      case 'guide-del':
+        if (!confirm('Delete this rule / guide?')) break;
+        try { const r = await api('guideDelete', { id: el.dataset.id }); S.guides = r.guides; ui('guide').open = ''; toast('Deleted'); renderPage(); } catch (err) { toast(err.message, true); }
+        break;
+      case 'ge-add': $('#ge-steps').insertAdjacentHTML('beforeend', stepEditor({}, $$('#ge-steps [data-step]').length)); renumberSteps(); break;
+      case 'ge-remove': if (confirm('Remove this step?')) { el.closest('[data-step]').remove(); renumberSteps(); } break;
+      case 'ge-up': { const c = el.closest('[data-step]'); if (c.previousElementSibling) c.parentNode.insertBefore(c, c.previousElementSibling); renumberSteps(); break; }
+      case 'ge-down': { const c = el.closest('[data-step]'); if (c.nextElementSibling) c.parentNode.insertBefore(c.nextElementSibling, c); renumberSteps(); break; }
       case 'guide-reset': store.del('am_guide_' + el.dataset.id); renderPage(); break;
       case 'guide-print': document.body.classList.add('print-guide'); window.print(); setTimeout(() => document.body.classList.remove('print-guide'), 500); break;
       case 'doc-view': e.preventDefault(); viewDoc(el.dataset.id); break;
@@ -3274,7 +3485,8 @@
           const emp = db.tables.Employees.find((e) => e.id === user.employeeId) || db.tables.Employees.find((e) => (e.email && e.email === user.email) || e.name.toLowerCase() === user.name.toLowerCase());
           const mine = (t) => (emp ? db.tables[t].filter((r) => r.employeeId === emp.id) : []);
           const me = emp ? { employee: emp, expenses: mine('EmployeeExpenses'), advances: mine('SalaryAdvances'), payments: mine('SalaryPayments') } : { employee: null };
-          return { ok: true, me: me, user: pub(user), settings: db.settings, data: JSON.parse(JSON.stringify(db.tables)), users: db.users.map(pub), estimates: est, attendanceToday: db.attendance.find((r) => r.email === user.email && r.date === today()) || null };
+          (db.leaves || []).forEach((l) => { l.canDecide = l.status === 'Pending' && l.email !== user.email && user.role === 'Admin'; });
+          return { ok: true, guides: db.guides || [], leaves: db.leaves || [], me: me, user: pub(user), settings: db.settings, data: JSON.parse(JSON.stringify(db.tables)), users: db.users.map(pub), estimates: est, attendanceToday: db.attendance.find((r) => r.email === user.email && r.date === today()) || null };
         }
         case 'estimatesList': return { ok: true, estimates: (db.estimates || []).map((r) => { const x = Object.assign({}, r); delete x.data; delete x.logs; return x; }) };
         case 'removeMany': db.tables[req.table] = db.tables[req.table].filter((x) => !req.ids.includes(x.id)); save(); return { ok: true, removed: req.ids.length };
@@ -3284,6 +3496,22 @@
           db.tables[req.table] = db.tables[req.table].filter((x) => !req.removeIds.includes(x.id)); save();
           return { ok: true, removed: req.removeIds.length, moved: 0 };
         }
+        case 'guidesList': return { ok: true, guides: db.guides || [] };
+        case 'guideSave': {
+          db.guides = db.guides || [];
+          const g = req.guide;
+          if (g.id) Object.assign(db.guides.find((x) => x.id === g.id), { data: g.data });
+          else db.guides.push({ id: uid('GD'), sort: db.guides.length + 1, data: g.data });
+          save(); return { ok: true, guides: db.guides };
+        }
+        case 'guideDelete': db.guides = (db.guides || []).filter((x) => x.id !== req.id); save(); return { ok: true, guides: db.guides };
+        case 'leaveSubmit': {
+          db.leaves = db.leaves || [];
+          db.leaves.push(Object.assign({ id: uid('LV'), email: user.email, name: user.name, designation: user.designation || '', status: 'Pending', days: 1, createdAt: new Date().toISOString() }, req.record));
+          save(); return { ok: true, leaves: db.leaves };
+        }
+        case 'leaveCancel': db.leaves.find((x) => x.id === req.id).status = 'Cancelled'; save(); return { ok: true, leaves: db.leaves };
+        case 'leaveDecide': Object.assign(db.leaves.find((x) => x.id === req.id), { status: req.decision, decidedBy: user.email, decisionNote: req.note }); save(); return { ok: true, leaves: db.leaves };
         case 'setPhoto': user.photo = req.photo; save(); return { ok: true, photo: req.photo };
         case 'estimateGet': { const r = (db.estimates || []).find((x) => x.id === req.id); return r ? { ok: true, record: JSON.parse(JSON.stringify(r)) } : fail('Estimate not found'); }
         case 'estimateSave': {
