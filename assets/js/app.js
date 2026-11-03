@@ -426,6 +426,7 @@
     S.attendanceToday = r.attendanceToday || null;
     S.me = r.me || { employee: null };
     S.guides = r.guides || [];
+    S.defaultRules = r.defaultRules || [];
     S.leaves = r.leaves || [];
   }
 
@@ -2767,6 +2768,98 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Accountant sheet & sync (two-way with the accountant's Day Book)
+  // ---------------------------------------------------------------------------
+  const RULE_ACTIONS = [['client', 'Client (money in = payment, out = site cost)'], ['office', 'Office expense'], ['staff', 'Employee (advance / salary decided by words)'], ['advance', 'Employee advance'], ['salary', 'Employee salary'], ['site', 'Site cost'], ['ignore', 'Ignore (capital, transfers…)']];
+  const KIND_LABEL = { payment: 'Client payment', site: 'Site cost', office: 'Office expense', advance: 'Advance', salary: 'Salary', ignore: 'Not counted' };
+  function ruleRow(r) {
+    r = r || { dir: 'any', field: 'both', action: 'client' };
+    const opt = (arr, v) => arr.map((o) => '<option value="' + o[0] + '"' + (o[0] === v ? ' selected' : '') + '>' + o[1] + '</option>').join('');
+    return '<tr data-rule>' +
+      '<td><input class="input" name="match" value="' + esc(r.match || '') + '" placeholder="e.g. dwarka, mridul"></td>' +
+      '<td><select class="input" name="field">' + opt([['both', 'Narration or remarks'], ['narration', 'Narration'], ['remarks', 'Remarks']], r.field) + '</select></td>' +
+      '<td><select class="input" name="dir">' + opt([['any', 'In or out'], ['in', 'Money in (CR)'], ['out', 'Money out (DR)']], r.dir) + '</select></td>' +
+      '<td><select class="input" name="action">' + opt(RULE_ACTIONS, r.action) + '</select></td>' +
+      '<td><input class="input" name="target" value="' + esc(r.target || '') + '" placeholder="Client / category / employee"' + ' list="rule-targets"></td>' +
+      '<td><input class="input" name="unless" value="' + esc(r.unless || '') + '" placeholder="optional"></td>' +
+      '<td style="white-space:nowrap"><button type="button" class="btn ghost sm" data-act="rule-up">↑</button><button type="button" class="btn ghost sm icon danger" data-act="rule-del">' + icon('trash') + '</button>' +
+      '<input type="hidden" name="note" value="' + esc(r.note || '') + '"><input type="hidden" name="fallback" value="' + esc(r.fallback || 'advance') + '"><input type="hidden" name="costType" value="' + esc(r.costType || '') + '"></td></tr>';
+  }
+  function accSheetHtml() {
+    const m = S.settings.mirror || {};
+    const rules = S.settings.dayBookRules || S.defaultRules || [];
+    let h = '<div class="card" style="margin-bottom:16px"><div class="card-body"><h2 style="margin:0 0 8px">How it works</h2>' +
+      '<div class="flow"><div><b>📒 Accountant’s Google Sheet</b><div class="small muted">Day Book tab: Date · DR · CR · Narration · Remarks</div></div>' +
+      '<div class="arrows"><span>' + (m.readEnabled ? '✅' : '⏸') + ' Sheet → Dashboard</span><span>' + (m.enabled ? '✅' : '⏸') + ' Dashboard → Sheet</span></div>' +
+      '<div><b>📊 Dashboard (office data)</b><div class="small muted">Clients, office, salary, dashboard totals</div></div></div>' +
+      '<ul class="small" style="line-height:1.8;margin:12px 0 0">' +
+      '<li><b>Sheet → Dashboard:</b> every line the accountant writes in the Day Book is read automatically (when anyone opens the dashboard, and every 15 minutes if auto sync is on) and sorted by the rules below into client payments, site costs, office expenses, advances and salary. If a line is changed or deleted in the sheet, the dashboard follows.</li>' +
+      '<li><b>Dashboard → Sheet:</b> every payment, site cost, office expense, advance or salary entered in the dashboard is written to the Day Book too, so the accountant’s book stays complete.</li>' +
+      '<li>Salaries and designations are also read from the <b>Salary Sheet</b> tab (latest month).</li></ul></div></div>';
+    h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Connection</h2>' + (m.readEnabled || m.enabled ? '<span class="badge good">Connected</span>' : '<span class="badge">Not connected</span>') + '</div><div class="card-body">' +
+      '<form id="mirror-form" style="display:flex;flex-direction:column;gap:12px">' +
+      '<label class="field">Accountant’s spreadsheet link<input class="input" name="spreadsheetId" placeholder="https://docs.google.com/spreadsheets/d/…" value="' + esc(m.spreadsheetId ? 'https://docs.google.com/spreadsheets/d/' + m.spreadsheetId + '/edit' : '') + '"><span class="field-hint">In that sheet: Share → add the Google account that owns the dashboard’s Apps Script → Editor.</span></label>' +
+      '<label class="field">Day Book tab name<input class="input" name="tab" value="' + esc(m.tab || 'Day Book') + '"></label>' +
+      '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="readEnabled"' + (m.readEnabled ? ' checked' : '') + '> <b>Sheet → Dashboard</b>: read the Day Book into the dashboard</label>' +
+      '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="enabled"' + (m.enabled ? ' checked' : '') + '> <b>Dashboard → Sheet</b>: write dashboard entries into the Day Book</label>' +
+      '<div class="sp"><button class="btn primary" type="submit">Save &amp; connect</button>' +
+      (m.readEnabled ? '<button class="btn" type="button" data-act="daybook-sync">' + icon('refresh') + 'Sync now</button><button class="btn" type="button" data-act="daybook-preview">Preview</button>' : '') +
+      (m.enabled ? '<button class="btn" type="button" data-act="mirror-sync">Copy dashboard entries to sheet</button>' : '') + '</div></form>' +
+      (m.lastSync ? '<p class="small muted" style="margin-bottom:0">Last sync: <b>' + esc(fmtStamp(m.lastSync)) + '</b> — ' + esc(m.lastResult || '') + '</p>' : '') +
+      '</div></div><div class="card"><div class="card-head"><h2>Good to know</h2></div><div class="card-body small" style="line-height:1.7">' +
+      '<p style="margin-top:0">• Columns <b>App Ref</b> and <b>App Sync</b> are added to the Day Book. Please don’t edit or delete them — they link each line to the dashboard.</p>' +
+      '<p>• Money that isn’t business income or spending (directors’ capital, own bank transfers) is <b>not counted</b>, by the “Ignore” rules.</p>' +
+      '<p>• Lines that don’t match any client go to <b>Unassigned site work</b>; add a rule (e.g. a contractor’s name → client) and press Sync now — they move automatically.</p>' +
+      '<p style="margin-bottom:0">• An old Day Book file import is replaced automatically on the first sync, so nothing is counted twice.</p></div></div></div>';
+    h += '<div class="card" style="margin-top:16px"><div class="card-head"><h2>Sorting rules</h2><div class="sp"><button class="btn sm" data-act="rule-add">' + icon('plus') + 'Add rule</button><button class="btn sm" data-act="rule-reset">Reset to default rules</button><button class="btn sm primary" data-act="rule-save">Save rules</button></div></div><div class="card-body">' +
+      '<p class="small muted" style="margin-top:0">Rules are checked top to bottom; the first one that matches decides. “Text contains” takes several words separated by commas (any of them matches). Lines matching no rule: money in is not counted, money out goes to Unassigned site work.</p>' +
+      '<datalist id="rule-targets">' + rows('Clients').map((c) => '<option value="' + esc(c.name) + '">').join('') + list('officeCategories').map((c) => '<option value="' + esc(c) + '">').join('') + rows('Employees').map((e) => '<option value="' + esc(e.name) + '">').join('') + '</datalist>' +
+      '<div class="table-wrap"><table class="data rules-table"><thead><tr><th>Text contains</th><th>Look in</th><th>Money</th><th>Treat as</th><th>Goes to</th><th>Not if contains</th><th></th></tr></thead><tbody id="rules-body">' +
+      (rules.length ? rules.map(ruleRow).join('') : '<tr><td colspan="7" class="empty">Rules load after the first save or sync — press “Reset to default rules”.</td></tr>') + '</tbody></table></div></div></div>';
+    h += '<div id="daybook-preview"></div>';
+    return h;
+  }
+  function bindAccSheet() {
+    $('#mirror-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = e.target.elements;
+      const btn = $('button[type=submit]', e.target);
+      btn.disabled = true;
+      try {
+        const r = await api('saveSettings', { settings: { mirror: { spreadsheetId: fd.spreadsheetId.value, tab: fd.tab.value, enabled: fd.enabled.checked, readEnabled: fd.readEnabled.checked } } });
+        S.settings = r.settings;
+        toast('Connected');
+        if (r.settings.mirror.readEnabled) await runDayBookSync(true);
+        renderPage();
+      } catch (ex) { toast(ex.message, true); btn.disabled = false; }
+    });
+  }
+  function collectRules() {
+    return $$('#rules-body [data-rule]').map((tr) => {
+      const v = (n) => $('[name=' + n + ']', tr).value.trim();
+      return { match: v('match'), field: v('field'), dir: v('dir'), action: v('action'), target: v('target'), unless: v('unless'), note: v('note'), fallback: v('fallback'), costType: v('costType') };
+    }).filter((r) => r.match);
+  }
+  async function runDayBookSync(loud) {
+    try {
+      const r = await api('dayBookSync');
+      S.settings.mirror.lastSync = new Date().toISOString();
+      S.settings.mirror.lastResult = r.result.summary;
+      if (r.result.added || r.result.changed || r.result.removed || r.result.salaryUpdated || r.result.undoneImport) await loadAll();
+      if (loud) toast('Day Book synced: ' + r.result.summary);
+      return r.result;
+    } catch (e) { if (loud) toast(e.message, true); return null; }
+  }
+  // Keep the dashboard current: read the Day Book when the app opens if the last sync is old.
+  async function autoDayBookSync() {
+    const m = S.settings && S.settings.mirror;
+    if (!canWrite() || !m || !m.readEnabled) return;
+    if (m.lastSync && Date.now() - new Date(m.lastSync).getTime() < 10 * 60000) return;
+    const r = await runDayBookSync(false);
+    if (r && (r.added || r.changed || r.removed)) { toast('Day Book: ' + r.summary); renderShell(); renderPage(); }
+  }
+
+  // ---------------------------------------------------------------------------
   // Settings
   // ---------------------------------------------------------------------------
   const LIST_LABELS = {
@@ -2777,7 +2870,7 @@
   function viewSettings() {
     const st = ui('settings');
     const items = [['profile', 'My profile'], ['guide', 'Rules & Guides']];
-    if (canWrite()) items.push(['lists', 'Dropdown lists'], ['accsheet', 'Accountant sheet'], ['duplicates', 'Duplicates', findDuplicates().length]);
+    if (canWrite()) items.push(['lists', 'Dropdown lists'], ['accsheet', 'Accountant sheet & sync'], ['duplicates', 'Duplicates', findDuplicates().length]);
     if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['attendance', 'Attendance'], ['notifications', 'Notifications'], ['import', 'Import data'], ['activity', 'Activity log']);
     if (!items.some((i) => i[0] === st.tab)) st.tab = 'profile';
     let h = pageHead('Settings', '');
@@ -2824,20 +2917,7 @@
         (S.settings.estimateTemplate ? '<button type="button" class="btn sm" data-act="tpl-reset" style="align-self:flex-start">Reset estimate template to default</button>' : '') +
         '</div></div></div><button class="btn primary" type="submit">Save</button></form>';
     } else if (st.tab === 'accsheet') {
-      const m = S.settings.mirror || {};
-      h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Accountant’s own spreadsheet</h2>' + (m.enabled ? '<span class="badge good">On</span>' : '<span class="badge">Off</span>') + '</div><div class="card-body">' +
-        '<p class="muted" style="margin-top:0">Two spreadsheets work together:</p><ul class="small" style="line-height:1.7;margin-top:0">' +
-        '<li><b>Office data</b> — the dashboard’s own Google Sheet. Everything entered here is saved there straight away.</li>' +
-        '<li><b>Accountant’s sheet</b> — the accountant’s personal workbook. Every payment, site cost, office expense, advance and salary entered in the dashboard is also written to its <b>Day Book</b> tab (Date · DR · CR · Narration · Remarks). Editing or deleting an entry in the dashboard updates or removes the same line.</li></ul>' +
-        '<form id="mirror-form" style="display:flex;flex-direction:column;gap:12px">' +
-        '<label class="field">Spreadsheet link<input class="input" name="spreadsheetId" placeholder="https://docs.google.com/spreadsheets/d/…" value="' + esc(m.spreadsheetId ? 'https://docs.google.com/spreadsheets/d/' + m.spreadsheetId + '/edit' : '') + '"><span class="field-hint">Share this spreadsheet as <b>Editor</b> with the Google account that owns the dashboard’s Apps Script.</span></label>' +
-        '<label class="field">Tab name<input class="input" name="tab" value="' + esc(m.tab || 'Day Book') + '"><span class="field-hint">Created if it doesn’t exist. An “App Ref” column is added so lines can be updated later.</span></label>' +
-        '<label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" name="enabled"' + (m.enabled ? ' checked' : '') + '> Write dashboard entries to this spreadsheet</label>' +
-        '<div class="sp"><button class="btn primary" type="submit">Save &amp; test</button>' + (m.enabled ? '<button class="btn" type="button" data-act="mirror-sync">Copy existing entries</button>' : '') + '</div></form>' +
-        '</div></div><div class="card"><div class="card-head"><h2>Notes</h2></div><div class="card-body small" style="line-height:1.7">' +
-        '<p style="margin-top:0">• Entries that came from the Day Book import are not written back, so nothing is doubled.</p>' +
-        '<p>• “Copy existing entries” writes every entry already made in the dashboard (not the imported ones) — safe to run again, lines are matched by App Ref.</p>' +
-        '<p style="margin-bottom:0">• Employee expense claims are not cash, so they are not written; they reach the Day Book as part of the salary payment.</p></div></div></div>';
+      h += accSheetHtml();
     } else if (st.tab === 'notifications') {
       const n = S.settings.notifications || { events: {}, managers: [] };
       const EV = [
@@ -2922,20 +3002,7 @@
         } catch (ex) { toast(ex.message, true); }
       });
     }
-    if (st.tab === 'accsheet') {
-      $('#mirror-form').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const fd = e.target.elements;
-        const btn = $('button[type=submit]', e.target);
-        btn.disabled = true;
-        try {
-          const r = await api('saveSettings', { settings: { mirror: { spreadsheetId: fd.spreadsheetId.value, tab: fd.tab.value, enabled: fd.enabled.checked } } });
-          S.settings = r.settings;
-          toast(r.settings.mirror.enabled ? 'Connected — new entries will be written to “' + r.settings.mirror.tab + '”' : 'Saved (writing is off)');
-          renderPage();
-        } catch (ex) { toast(ex.message, true); btn.disabled = false; }
-      });
-    }
+    if (st.tab === 'accsheet') bindAccSheet();
     if (st.tab === 'notifications') {
       $('#notif-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -3201,6 +3268,40 @@
         break;
       case 'dup-run': runDuplicates(el); break;
       case 'leave-new': openLeaveForm(); break;
+      case 'daybook-sync': el.disabled = true; await runDayBookSync(true); renderPage(); break;
+      case 'daybook-preview': {
+        el.disabled = true;
+        try {
+          const r = await api('dayBookPreview');
+          const box = $('#daybook-preview');
+          box.innerHTML = '<div class="card" style="margin-top:16px"><div class="card-head"><h2>Preview — where each Day Book line goes</h2></div><div class="card-body">' + dataTable('db-preview', [
+            { k: 'row', l: 'Row', v: (x) => x.row, f: (x) => String(x.row) },
+            { k: 'date', l: 'Date', f: (x) => esc(fmtDate(x.date)) },
+            { k: 'narration', l: 'Narration / Remarks', primary: true, f: (x) => esc(x.narration) + '<div class="cell-sub">' + esc(x.remarks) + '</div>' },
+            { k: 'amt', l: 'Amount', r: true, v: (x) => x.cr || x.dr, f: (x) => (x.cr ? '<span class="pos">+' + inr(x.cr) + '</span>' : inr(x.dr)) },
+            { k: 'kind', l: 'Goes to', f: (x) => '<span class="badge' + (x.kind === 'ignore' ? '' : ' accent') + '">' + esc(KIND_LABEL[x.kind] || x.kind) + '</span><div class="cell-sub">' + esc(x.target) + (x.costType ? ' · ' + esc(x.costType) : '') + '</div>' },
+          ], r.rows.slice().reverse(), { name: 'Day Book preview' }) + '</div></div>';
+          box.scrollIntoView({ behavior: 'smooth' });
+        } catch (err) { toast(err.message, true); }
+        el.disabled = false;
+        break;
+      }
+      case 'rule-add': $('#rules-body').insertAdjacentHTML('afterbegin', ruleRow()); break;
+      case 'rule-del': el.closest('[data-rule]').remove(); break;
+      case 'rule-up': { const tr = el.closest('[data-rule]'); if (tr.previousElementSibling) tr.parentNode.insertBefore(tr, tr.previousElementSibling); break; }
+      case 'rule-reset':
+        if (!confirm('Replace your rules with the default rules?')) break;
+        try { const r = await api('saveSettings', { settings: { dayBookRules: null } }); S.settings = r.settings; toast('Default rules restored'); renderPage(); } catch (err) { toast(err.message, true); }
+        break;
+      case 'rule-save':
+        el.disabled = true;
+        try {
+          const r = await api('saveSettings', { settings: { dayBookRules: collectRules() } });
+          S.settings = r.settings;
+          toast('Rules saved — press Sync now to re-sort changed lines');
+        } catch (err) { toast(err.message, true); }
+        el.disabled = false;
+        break;
       case 'mirror-sync':
         if (!confirm('Write every dashboard entry (not the imported ones) to the accountant’s sheet?')) break;
         el.disabled = true;
@@ -3396,7 +3497,7 @@
       clearSession();
     }
     render();
-    if (S.user && !S.user.mustChange) autoAttendance();
+    if (S.user && !S.user.mustChange) { autoAttendance(); autoDayBookSync(); }
   }
 
   const savedTheme = store.get('am_theme');

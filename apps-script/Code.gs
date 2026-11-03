@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-06.1';
+const API_VERSION = '2026-11-07.1';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -97,6 +97,7 @@ const SCHEMA = {
   LeaveRequests: {
     fields: 'id email name designation type fromDate:date toDate:date days:number reason status decidedBy decidedAt decisionNote ' + META_FIELDS,
   },
+  DayBookLinks: { fields: 'id hash kind recordTable recordId amount:number date:date summary ' + META_FIELDS },
   Settings: { fields: 'key value updatedBy updatedAt' },
   AuditLog: { fields: 'timestamp user action table recordId details' },
 };
@@ -120,7 +121,8 @@ const DEFAULT_SETTINGS = {
   employeeSource: null,
   imports: [],
   hiddenTabs: [],
-  mirror: { enabled: false, spreadsheetId: '', tab: 'Day Book' },
+  mirror: { enabled: false, spreadsheetId: '', tab: 'Day Book', readEnabled: false, lastSync: '', lastResult: '' },
+  dayBookRules: null,
   leaveApprovers: [
     { email: 'abhishek@urbaneliving.in', scope: 'all' }, { email: 'digvijay@urbaneliving.in', scope: 'all' },
     { email: 'it@urbaneliving.in', scope: 'all' }, { email: 'vibhooti@urbaneliving.in', scope: 'sales' },
@@ -195,6 +197,8 @@ function route_(req) {
     case 'setHiddenTabs': return setHiddenTabs_(user, req.tabs);
     case 'setPhoto': return setPhoto_(user, req.photo);
     case 'mirrorSyncAll': return mirrorSyncAll_(user);
+    case 'dayBookSync': needRole_(user, WRITE_ROLES); return { result: syncDayBook_(user) };
+    case 'dayBookPreview': needRole_(user, WRITE_ROLES); return { rows: previewDayBook_() };
     case 'guidesList': return { guides: guidesList_() };
     case 'guideSave': return guideSave_(user, req.guide);
     case 'guideDelete': return guideDelete_(user, req.id);
@@ -351,6 +355,7 @@ function bootstrap_(user) {
     estimates: estimatesList_(user),
     me: mySelf_(user),
     guides: guidesList_(),
+    defaultRules: WRITE_ROLES.indexOf(user.role) >= 0 ? defaultDayBookRules_() : [],
     leaves: leaveList_(user),
     attendanceToday: attendanceToday_(user),
     users: users.map(function (u) {
@@ -648,6 +653,7 @@ function readSettings_() {
       else if (r.key === 'employeeSource') s.employeeSource = v;
       else if (r.key === 'attendance') s.attendance = Object.assign(s.attendance, v);
       else if (r.key === 'mirror') s.mirror = Object.assign(s.mirror, v);
+      else if (r.key === 'dayBookRules' && Array.isArray(v)) { s.dayBookRules = v; s.dayBookRulesCustom = true; }
       else if (r.key === 'estimateCounter') s.estimateCounter = Number(v) || s.estimateCounter;
       else if (r.key === 'estimateTemplate') s.estimateTemplate = v;
       else if ((r.key === 'imports' || r.key === 'hiddenTabs' || r.key === 'leaveApprovers') && Array.isArray(v)) s[r.key] = v;
@@ -690,9 +696,13 @@ function saveSettings_(user, settings) {
   if (settings.mirror) {
     const m = settings.mirror;
     const id = (String(m.spreadsheetId || '').match(/\/d\/([a-zA-Z0-9-_]+)/) || [])[1] || String(m.spreadsheetId || '').trim();
-    const cfg = { enabled: !!m.enabled && !!id, spreadsheetId: id, tab: String(m.tab || 'Day Book').trim().slice(0, 80) || 'Day Book' };
-    if (cfg.enabled) mirrorSheet_(cfg);
+    const old = readSettings_().mirror;
+    const cfg = { enabled: !!m.enabled && !!id, readEnabled: !!m.readEnabled && !!id, spreadsheetId: id, tab: String(m.tab || 'Day Book').trim().slice(0, 80) || 'Day Book', lastSync: old.lastSync || '', lastResult: old.lastResult || '' };
+    if (cfg.enabled || cfg.readEnabled) mirrorSheet_(cfg);
     entries.push(['mirror', cfg]);
+  }
+  if ('dayBookRules' in settings) {
+    entries.push(['dayBookRules', settings.dayBookRules ? settings.dayBookRules.slice(0, 300).map(cleanRule_) : null]);
   }
   if (settings.leaveApprovers) {
     if (user.role !== 'Admin') throw err_('Only Admin can change leave approvers', 'FORBIDDEN');
@@ -1233,7 +1243,7 @@ function mirrorSheet_(cfg) {
   const head = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
   let refCol = head.indexOf('App Ref') + 1;
   if (!refCol) { refCol = Math.max(lastCol, 5) + 1; sh.getRange(1, refCol).setValue('App Ref').setFontWeight('bold'); }
-  return { sh: sh, refCol: refCol, name: ss.getName() };
+  return { sh: sh, refCol: refCol, name: ss.getName(), ss: ss };
 }
 
 function mirrorRow_(table, r) {
@@ -1254,7 +1264,7 @@ function mirror_(table, r, op) {
   if (MIRROR_TABLES.indexOf(table) < 0) return;
   const cfg = readSettings_().mirror;
   if (!cfg.enabled || !cfg.spreadsheetId) return;
-  if (op !== 'delete' && /\[import:/.test(r.notes || '')) return;
+  if (op !== 'delete' && /\[(import:|daybook)/.test(r.notes || '')) return;
   try {
     const m = mirrorSheet_(cfg);
     const last = m.sh.getLastRow();
@@ -1284,6 +1294,360 @@ function mirrorSyncAll_(user) {
   });
   audit_(user, 'sync', 'Accountant sheet', '', n + ' entries');
   return { synced: n };
+}
+
+// ---------------------------------------------------------------------------
+// Day Book → dashboard. Lines the accountant writes in the Day Book tab are
+// read every 15 minutes (or on "Sync now"), sorted by the rules below into
+// client payments, site costs, office expenses, advances and salary, and
+// linked back through the App Ref column (DB-…). Edited lines are re-sorted,
+// deleted lines are removed from the dashboard. Lines written by the
+// dashboard itself (App Ref = a record id) are skipped.
+// ---------------------------------------------------------------------------
+const DAYBOOK_TAG = '[daybook]';
+let SALARY_INFO_ = {};
+
+function cleanRule_(r) {
+  const actions = ['ignore', 'client', 'site', 'office', 'staff', 'advance', 'salary'];
+  return {
+    match: String(r.match || '').toLowerCase().slice(0, 300), unless: String(r.unless || '').toLowerCase().slice(0, 300),
+    field: ['both', 'narration', 'remarks'].indexOf(r.field) >= 0 ? r.field : 'both', dir: ['any', 'in', 'out'].indexOf(r.dir) >= 0 ? r.dir : 'any',
+    action: actions.indexOf(r.action) >= 0 ? r.action : 'ignore', target: String(r.target || '').slice(0, 120), costType: String(r.costType || '').slice(0, 30),
+    fallback: r.fallback === 'salary' ? 'salary' : 'advance', note: String(r.note || '').slice(0, 120),
+  };
+}
+
+function defaultDayBookRules_() {
+  const R = function (dir, field, match, action, target, extra) { return Object.assign({ dir: dir, field: field, match: match, action: action, target: target || '', unless: '', costType: '', fallback: 'advance', note: '' }, extra || {}); };
+  return [
+    R('in', 'both', 'digvijay', 'ignore', '', { note: 'Capital from Digvijay ji' }),
+    R('in', 'both', 'abhishek, askabhi, personal, capital, 9667999139', 'ignore', '', { note: 'Capital from Abhishek ji' }),
+    R('in', 'both', 'vibhoot', 'ignore', '', { note: 'Money from Vibhooti ji' }),
+    R('any', 'both', 'cash received from bank, cash deposit, transfer to idfc, cnrb bank', 'ignore', '', { note: 'Transfer between own accounts' }),
+    R('out', 'narration', 'abhishek', 'ignore', '', { note: 'Drawings by Abhishek ji' }),
+    R('out', 'remarks', 'capital', 'ignore', '', { note: 'Drawings by Abhishek ji' }),
+    R('out', 'both', 'vibhuti, vibhooti', 'ignore', '', { unless: 'material', note: 'Paid to Vibhooti ji (imprest)' }),
+    R('out', 'both', 'aunty, cleaning staff', 'salary', 'Office Cleaning Aunty'),
+    R('out', 'both', 'bank charge, mobile alert', 'office', 'Bank Charges'),
+    R('out', 'both', 'rent', 'office', 'Office Rent', { unless: 'rental, current, parent, different' }),
+    R('out', 'both', 'light payment, electricity', 'office', 'Electricity Bill'),
+    R('out', 'both', 'ac purchased, system purchased, chair, water dispenser, attendance device, headphone, wall clock, laser measure, tally purchased', 'office', 'Office Equipment & Assets'),
+    R('out', 'both', 'software, caller desk, graphy, eloquent', 'office', 'Software & Subscriptions'),
+    R('out', 'both', 'facebook, advertis, marketing, mannan, office cards', 'office', 'Advertisement & Marketing'),
+    R('out', 'both', 'legal, itr, navendu, niranjan, msk associates, tax payment', 'office', 'Legal & Professional'),
+    R('out', 'both', 'internet, wifi, telephone, credit card vi', 'office', 'Internet / Phone'),
+    R('out', 'both', 'porter boy, courier, parcel', 'office', 'Postage & Courier'),
+    R('out', 'both', 'printing, stationary, stationery', 'office', 'Stationery'),
+    R('out', 'both', 'entertainment, burger', 'office', 'Staff Welfare & Entertainment'),
+    R('out', 'both', 'office exp, office expense, hari om, cctv, paid to lata', 'office', 'General Office Expense'),
+    R('out', 'remarks', 'suspense', 'office', 'Suspense (to classify)', { unless: 'farman, sabir, ruplal, kundan, sakib, ishaq, jindal, s.d, sd trading, laser, deepak, false ceiling, kkbk, salary' }),
+    R('any', 'both', 'shri krishna, mohit garg', 'client', 'Shri Krishna Enterprises (Mohit Garg)'),
+    R('any', 'both', 'mridul, dwarka, ace divino, tile la', 'client', 'Mridul Sharma (Dwarka Sec 23)'),
+    R('any', 'both', 'mohit, plumber, 7210257902, adv moh', 'client', 'Mohit Sharma (Mohit Ji Site)'),
+    R('any', 'both', 'abhijeet', 'client', 'Abhijeet Ji'),
+    R('any', 'both', 'sushil, teriwal, tekriwal', 'client', 'Sushil Tekriwal'),
+    R('any', 'both', 'rakesh', 'client', 'Rakesh (Mayur Vihar Ph-3)'),
+    R('any', 'both', 'ravind', 'client', 'Ravindra Aggarwal'),
+    R('any', 'both', 'soubh, saubh', 'client', 'Soubhagya Sahoo'),
+    R('any', 'both', 'nirvesh, narvesh', 'client', 'Nirvesh Gupta'),
+    R('any', 'both', 'kuldeep', 'client', 'Kuldeep Keshari (Noida)'),
+    R('any', 'both', 'sumit ji site', 'client', 'Sumit Ji Site'),
+    R('any', 'both', 'ramawati', 'client', 'Ramawati Prasad'),
+    R('any', 'both', 'preeti', 'client', 'Preeti Kumari'),
+    R('any', 'both', 'aashish', 'client', 'Aashish Kumar Pathak'),
+    R('any', 'both', 'niraj', 'client', 'Mridul Sharma (Dwarka Sec 23)'),
+    R('out', 'both', 'afjal, afzal', 'staff', 'Afzal Ansari', { fallback: 'advance' }),
+    R('out', 'both', 'saban, sawan', 'staff', 'Saban Jha', { fallback: 'salary' }),
+    R('out', 'both', 'ayush, aayush', 'staff', 'Ayush Kumar', { fallback: 'advance', unless: 'paint' }),
+    R('out', 'both', 'archit', 'staff', 'Archit Kumar', { fallback: 'salary' }),
+    R('out', 'both', 'karun', 'staff', 'Karun Kumar', { fallback: 'salary' }),
+    R('out', 'both', 'divya, kkbk0005289', 'staff', 'Divya Singh', { fallback: 'salary' }),
+    R('out', 'both', 'prem jha', 'staff', 'Prem Jha', { fallback: 'salary' }),
+    R('out', 'both', 'lata', 'staff', 'Lata Rawat', { fallback: 'salary' }),
+    R('out', 'both', 'nehal', 'staff', 'Nehal', { fallback: 'salary' }),
+    R('out', 'both', 'ghanshyam', 'staff', 'Ghanshyam Jha', { fallback: 'salary' }),
+    R('in', 'both', 'suspense', 'ignore', '', { note: 'Receipt not linked to a client' }),
+  ];
+}
+
+function dayBookRules_() {
+  return readSettings_().dayBookRules || defaultDayBookRules_();
+}
+
+function linkSummary_(c) {
+  return (c.kind + ' ' + (c.client || c.employee || c.category || c.why || '') + (c.costType ? ' ' + c.costType : '') + (c.salaryMonth ? ' ' + c.salaryMonth : '')).slice(0, 200);
+}
+
+function costTypeOf_(t, narr) {
+  if (/transport|porter of|md zebrel|loower|driver/.test(t)) return 'Transport';
+  if (/material/.test(narr)) return 'Material';
+  if (/painter|labou?r|contractor|civil|carp|plumb|epoxy|expoy|grouting|labor|piping|paiping/.test(t)) return 'Labour';
+  if (/material|timber|wood|wodden|trading|paint|ply|stone|hardware|frames|snik|sink|gm ind|g mind|bricks|sehrawat|daksh|balaji|jindal|kaila|hlmk|sofa|nfc|tiles|channel/.test(t)) return 'Material';
+  if (/farman|sabir|shabir|sonu|niraj|sakib|nasim|sanjeet|shoaib|ishaq|ruplal|rupal|ugan|kundan|dharmendra|fateh|prateek|deepak|simran|amit|mukhtar|asif/.test(t)) return 'Labour';
+  return 'Other';
+}
+
+function salaryMonthOf_(date, cutoff) {
+  const d = new Date(date + 'T00:00:00');
+  if (d.getDate() <= cutoff) d.setDate(0);
+  return Utilities.formatDate(d, TZ, 'yyyy-MM');
+}
+
+// Decide what one Day Book line is. Returns { kind, ... } without saving.
+function classifyLine_(line, rules) {
+  const narr = line.narration.toLowerCase();
+  const rem = line.remarks.toLowerCase();
+  const both = narr + ' | ' + rem;
+  const dir = line.cr ? 'in' : 'out';
+  const amount = line.cr || line.dr;
+  const has = function (text, list) { return list.split(',').map(function (x) { return x.trim(); }).filter(String).some(function (k) { return text.indexOf(k) >= 0; }); };
+  const rule = rules.filter(function (r) {
+    if (r.dir !== 'any' && r.dir !== dir) return false;
+    const text = r.field === 'narration' ? narr : r.field === 'remarks' ? rem : both;
+    return r.match && has(text, r.match) && !(r.unless && has(both, r.unless));
+  })[0];
+  const desc = line.narration.toLowerCase() === line.remarks.toLowerCase() || !line.remarks ? line.narration : line.narration + ' — ' + line.remarks;
+  const mode = /credit card/.test(both) ? 'Card' : /\bupi\b|@/.test(both) ? 'UPI' : /neft|rtgs|imps|bank/.test(both) ? 'Bank Transfer' : /cash/.test(both) ? 'Cash' : '';
+  const base = { amount: amount, date: line.date, desc: desc, mode: mode };
+  if (rule && rule.action === 'ignore') return Object.assign(base, { kind: 'ignore', why: rule.note || 'Ignored by rule' });
+  if (rule && rule.action === 'office') return Object.assign(base, { kind: dir === 'in' ? 'ignore' : 'office', category: rule.target || 'General Office Expense', why: 'Office expense' });
+  if (rule && rule.action === 'client') {
+    if (dir === 'in') return Object.assign(base, { kind: 'payment', client: rule.target });
+    return Object.assign(base, { kind: 'site', client: rule.target, costType: rule.costType || costTypeOf_(both, narr) });
+  }
+  if (rule && (rule.action === 'staff' || rule.action === 'advance' || rule.action === 'salary')) {
+    if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Money in from an employee' });
+    let k = rule.action === 'staff' ? null : rule.action;
+    if (!k) k = /advance|adv\b|imprest/.test(both) ? 'advance' : /salary|salry|full and final|conveyance|kkbk/.test(both) ? 'salary' : rule.fallback;
+    return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: salaryMonthOf_(line.date, k === 'advance' ? 12 : 20) });
+  }
+  if (rule && rule.action === 'site') return Object.assign(base, { kind: dir === 'in' ? 'ignore' : 'site', client: rule.target || 'Unassigned site work', costType: rule.costType || costTypeOf_(both, narr) });
+  if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Receipt with no matching client rule' });
+  return Object.assign(base, { kind: 'site', client: 'Unassigned site work', costType: costTypeOf_(both, narr) });
+}
+
+function readDayBookLines_(m) {
+  const last = m.sh.getLastRow();
+  if (last < 2) return [];
+  const width = Math.max(m.refCol + 1, 7);
+  const vals = m.sh.getRange(2, 1, last - 1, width).getValues();
+  const disp = m.sh.getRange(2, 1, last - 1, 1).getDisplayValues();
+  const out = [];
+  let lastDate = '';
+  vals.forEach(function (r, i) {
+    const dr = Number(String(r[1]).replace(/[₹,\s]/g, '')) || 0;
+    const cr = Number(String(r[2]).replace(/[₹,\s]/g, '')) || 0;
+    let date = r[0] instanceof Date ? Utilities.formatDate(r[0], TZ, 'yyyy-MM-dd') : '';
+    if (!date && disp[i][0]) {
+      const dm = String(disp[i][0]).match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/);
+      if (dm) date = dm[3] + '-' + ('0' + dm[2]).slice(-2) + '-' + ('0' + dm[1]).slice(-2);
+    }
+    if (date) lastDate = date; else date = lastDate;
+    if ((!dr && !cr) || !date) return;
+    out.push({
+      row: i + 2, date: date, dr: dr, cr: cr, narration: String(r[3] || '').trim(), remarks: String(r[4] || '').trim(),
+      ref: String(r[m.refCol - 1] || '').trim(), hash: String(r[m.refCol] || '').trim(),
+    });
+  });
+  return out;
+}
+
+function lineHash_(l) {
+  return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, [l.date, l.dr, l.cr, l.narration, l.remarks].join('|'), Utilities.Charset.UTF_8)).slice(0, 16);
+}
+
+function previewDayBook_() {
+  const cfg = readSettings_().mirror;
+  if (!cfg.spreadsheetId) throw err_('Link the accountant\'s spreadsheet first');
+  const m = mirrorSheet_(cfg);
+  const rules = dayBookRules_();
+  return readDayBookLines_(m).filter(function (l) { return !l.ref || /^DB-/.test(l.ref); }).slice(-300).map(function (l) {
+    const c = classifyLine_(l, rules);
+    return { row: l.row, date: l.date, dr: l.dr, cr: l.cr, narration: l.narration, remarks: l.remarks, kind: c.kind, target: c.client || c.employee || c.category || c.why || '', costType: c.costType || '' };
+  });
+}
+
+// Undo what a link did in the dashboard.
+function revertLink_(user, link) {
+  if (!link.recordId) return;
+  if (link.recordTable === 'SalaryPayments') {
+    const p = readTable_('SalaryPayments').filter(function (x) { return x.id === link.recordId; })[0];
+    if (!p) return;
+    const left = Math.round((Number(p.paidAmount) - Number(link.amount)) * 100) / 100;
+    if (left <= 0 && /\[daybook\]/.test(p.notes || '')) removeIdsRaw_('SalaryPayments', [p.id]);
+    else patchRow_('SalaryPayments', p.id, { paidAmount: Math.max(0, left), netPayable: Math.max(0, left) });
+    return;
+  }
+  removeIdsRaw_(link.recordTable, [link.recordId]);
+}
+
+function removeIdsRaw_(table, ids) {
+  const sh = sheet_(table);
+  const values = sh.getDataRange().getValues();
+  const idCol = values[0].map(String).indexOf('id');
+  for (let i = values.length - 1; i >= 1; i--) if (ids.indexOf(String(values[i][idCol])) >= 0) sh.deleteRow(i + 1);
+}
+
+// Latest salary block of the accountant's "Salary Sheet" tab: first name → details.
+function readSalarySheet_(ss) {
+  const sh = ss.getSheetByName('Salary Sheet');
+  if (!sh || sh.getLastRow() < 2) return {};
+  const v = sh.getRange(1, 1, sh.getLastRow(), Math.min(Math.max(sh.getLastColumn(), 1), 15)).getValues();
+  let out = {};
+  for (let i = 0; i < v.length; i++) {
+    const head = v[i].map(function (x) { return String(x).trim().toLowerCase(); });
+    const nameCol = head.indexOf('name');
+    const salCol = head.indexOf('total salary');
+    if (nameCol < 0 || salCol < 0) continue;
+    const desCol = head.indexOf('designation');
+    const joinCol = head.findIndex ? head.findIndex(function (h) { return /joining/.test(h); }) : -1;
+    const block = {};
+    for (let j = i + 1; j < v.length; j++) {
+      const name = String(v[j][nameCol] || '').trim();
+      if (String(v[j][nameCol]).toLowerCase() === 'name') break;
+      const sal = Number(v[j][salCol]) || 0;
+      if (!name || !sal || /water|rent|total|electric|maint/i.test(name)) continue;
+      block[name.split(/\s+/)[0].toLowerCase()] = {
+        name: name, salary: sal, designation: desCol >= 0 ? String(v[j][desCol] || '').trim() : '',
+        joiningDate: joinCol >= 0 && v[j][joinCol] instanceof Date ? Utilities.formatDate(v[j][joinCol], TZ, 'yyyy-MM-dd') : '',
+      };
+    }
+    if (Object.keys(block).length) out = block; // keep the last (latest month) block
+  }
+  return out;
+}
+
+function applySalarySheet_(user, info) {
+  let n = 0;
+  readTable_('Employees').forEach(function (e) {
+    const s = info[String(e.name).split(/\s+/)[0].toLowerCase()];
+    if (!s) return;
+    const patch = {};
+    if (Number(e.monthlySalary) !== s.salary) patch.monthlySalary = s.salary;
+    if (s.joiningDate && !e.joiningDate) patch.joiningDate = s.joiningDate;
+    if (Object.keys(patch).length) { patchRow_('Employees', e.id, Object.assign(patch, { updatedBy: user.email, updatedAt: new Date().toISOString() })); n++; }
+  });
+  return n;
+}
+
+function ensureNamed_(user, table, name, extra) {
+  const key = String(name).trim().toLowerCase();
+  const found = readTable_(table).filter(function (r) { return String(r.name).trim().toLowerCase() === key; })[0];
+  if (found) return found.id;
+  const now = new Date().toISOString();
+  const o = Object.assign({ id: newId_(table === 'Clients' ? 'CL' : 'EM'), name: name, status: table === 'Clients' ? 'Ongoing' : 'Active', notes: 'Created from the Day Book ' + DAYBOOK_TAG, createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now }, extra || {});
+  if (table === 'Clients') { const v = sheet_('Clients').getDataRange().getValues(); o.clientCode = nextCode_(v, v[0].map(String), 'clientCode', 'UL-C-'); }
+  if (table === 'Employees') {
+    const v = sheet_('Employees').getDataRange().getValues();
+    o.empCode = nextCode_(v, v[0].map(String), 'empCode', 'UL-E-');
+    const s = (SALARY_INFO_ || {})[String(name).split(/\s+/)[0].toLowerCase()] || {};
+    o.monthlySalary = s.salary || 0;
+    if (s.designation) o.designation = s.designation;
+    if (s.joiningDate) o.joiningDate = s.joiningDate;
+  }
+  appendObj_(table, o);
+  return o.id;
+}
+
+// Apply one classified line; returns { recordTable, recordId, amount }.
+function applyLine_(user, c, ref) {
+  const now = new Date().toISOString();
+  const meta = { createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now };
+  const note = 'Day Book ' + ref + ' ' + DAYBOOK_TAG;
+  const add = function (table, o) { o.id = newId_(SCHEMA[table].prefix); appendObj_(table, Object.assign(o, meta)); return { recordTable: table, recordId: o.id, amount: c.amount }; };
+  if (c.kind === 'payment') return add('ClientPayments', { date: c.date, clientId: ensureNamed_(user, 'Clients', c.client), amount: c.amount, mode: c.mode, reference: c.desc.slice(0, 200), notes: note });
+  if (c.kind === 'site') return add('ClientWork', { date: c.date, clientId: ensureNamed_(user, 'Clients', c.client), costType: c.costType, description: c.desc.slice(0, 300), amount: c.amount, vendorPaid: 'Paid', notes: note });
+  if (c.kind === 'office') {
+    const cats = readSettings_().lists.officeCategories;
+    if (cats.indexOf(c.category) < 0) writeSettings_(user, [['list.officeCategories', cats.concat([c.category])]]);
+    return add('OfficeExpenses', { date: c.date, category: c.category, amount: c.amount, mode: c.mode, description: c.desc.slice(0, 300), notes: note });
+  }
+  if (c.kind === 'advance') return add('SalaryAdvances', { date: c.date, employeeId: ensureNamed_(user, 'Employees', c.employee), amount: c.amount, mode: c.mode, salaryMonth: c.salaryMonth, notes: note + ' ' + c.desc.slice(0, 150) });
+  if (c.kind === 'salary') {
+    const empId = ensureNamed_(user, 'Employees', c.employee);
+    const p = readTable_('SalaryPayments').filter(function (x) { return x.employeeId === empId && x.salaryMonth === c.salaryMonth; })[0];
+    if (p) {
+      const paid = Math.round((Number(p.paidAmount) + c.amount) * 100) / 100;
+      patchRow_('SalaryPayments', p.id, { paidAmount: paid, netPayable: Math.max(Number(p.netPayable) || 0, paid), paidDate: c.date > p.paidDate ? c.date : p.paidDate, updatedBy: user.email, updatedAt: now });
+      return { recordTable: 'SalaryPayments', recordId: p.id, amount: c.amount };
+    }
+    const emp = readTable_('Employees').filter(function (x) { return x.id === empId; })[0];
+    return add('SalaryPayments', { salaryMonth: c.salaryMonth, employeeId: empId, baseSalary: Number(emp.monthlySalary) || c.amount, expenses: 0, advances: 0, deduction: 0, bonus: 0, netPayable: c.amount, paidAmount: c.amount, paidDate: c.date, mode: c.mode, notes: note });
+  }
+  return { recordTable: '', recordId: '', amount: c.amount };
+}
+
+function syncDayBook_(user) {
+  user = user || { email: 'auto-sync', name: 'Auto sync', role: 'Admin' };
+  const settings = readSettings_();
+  const cfg = settings.mirror;
+  if (!cfg.readEnabled || !cfg.spreadsheetId) throw err_('Turn on “Read the Day Book into the dashboard” first');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(60000);
+  const res = { added: 0, changed: 0, removed: 0, ignored: 0, unchanged: 0 };
+  try {
+    // A file import of the same Day Book would double everything: undo it first.
+    (settings.imports || []).filter(function (i) { return !i.undone && /^DAYBOOK/.test(i.tag); }).forEach(function (i) { lock.releaseLock(); undoImport_(Object.assign({}, user, { role: 'Admin' }), i.tag, true); lock.waitLock(60000); res.undoneImport = i.tag; });
+    const m = mirrorSheet_(cfg);
+    let hashCol = m.refCol + 1;
+    if (String(m.sh.getRange(1, hashCol).getValue()) !== 'App Sync') m.sh.getRange(1, hashCol).setValue('App Sync').setFontWeight('bold');
+    const rules = dayBookRules_();
+    SALARY_INFO_ = readSalarySheet_(m.ss);
+    res.salaryUpdated = applySalarySheet_(user, SALARY_INFO_);
+    const links = {};
+    readTable_('DayBookLinks').forEach(function (l) { links[l.id] = l; });
+    const seen = {};
+    readDayBookLines_(m).forEach(function (l) {
+      if (l.ref && !/^DB-/.test(l.ref)) return; // written by the dashboard itself
+      const h = lineHash_(l);
+      if (l.ref && links[l.ref]) {
+        seen[l.ref] = true;
+        const c = classifyLine_(l, rules);
+        if (links[l.ref].hash === h && links[l.ref].summary === linkSummary_(c)) { res.unchanged++; return; }
+        revertLink_(user, links[l.ref]);
+        const a = applyLine_(user, c, l.ref);
+        patchRow_('DayBookLinks', l.ref, { hash: h, kind: c.kind, recordTable: a.recordTable, recordId: a.recordId, amount: c.amount, date: c.date, summary: linkSummary_(c), updatedBy: user.email, updatedAt: new Date().toISOString() });
+        m.sh.getRange(l.row, hashCol).setValue(h);
+        res.changed++;
+        return;
+      }
+      const ref = newId_('DB');
+      const c = classifyLine_(l, rules);
+      const a = applyLine_(user, c, ref);
+      const now = new Date().toISOString();
+      appendObj_('DayBookLinks', { id: ref, hash: h, kind: c.kind, recordTable: a.recordTable, recordId: a.recordId, amount: c.amount, date: c.date, summary: linkSummary_(c), createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now });
+      m.sh.getRange(l.row, m.refCol).setValue(ref);
+      m.sh.getRange(l.row, hashCol).setValue(h);
+      seen[ref] = true;
+      if (c.kind === 'ignore') res.ignored++; else res.added++;
+    });
+    Object.keys(links).forEach(function (id) {
+      if (seen[id]) return;
+      revertLink_(user, links[id]);
+      removeIdsRaw_('DayBookLinks', [id]);
+      res.removed++;
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  const summary = res.added + ' added, ' + res.changed + ' changed, ' + res.removed + ' removed, ' + res.ignored + ' ignored' + (res.salaryUpdated ? ', ' + res.salaryUpdated + ' salaries updated from the Salary Sheet' : '') + (res.undoneImport ? ' (old file import ' + res.undoneImport + ' replaced)' : '');
+  const cur = readSettings_().mirror;
+  writeSettings_(user, [['mirror', Object.assign(cur, { lastSync: new Date().toISOString(), lastResult: summary })]]);
+  if (res.added || res.changed || res.removed) audit_(user, 'sync', 'Day Book', '', summary);
+  return Object.assign(res, { summary: summary });
+}
+
+/** Time trigger target (every 15 minutes). */
+function autoSyncDayBook() {
+  const cfg = readSettings_().mirror;
+  if (cfg.readEnabled && cfg.spreadsheetId) syncDayBook_();
+}
+
+/** Run once from the editor to read the Day Book automatically every 15 minutes. */
+function enableAutoSync() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'autoSyncDayBook') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('autoSyncDayBook').timeBased().everyMinutes(15).create();
+  Logger.log('Auto sync is on: the Day Book is read every 15 minutes.');
 }
 
 // ---------------------------------------------------------------------------
@@ -1696,14 +2060,14 @@ function importBatch_(user, data) {
   return { counts: counts };
 }
 
-function undoImport_(user, tag) {
+function undoImport_(user, tag, keepEntities) {
   needRole_(user, ['Admin']);
   const mark = tagOf_(String(tag || ''));
   const counts = {};
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    IMPORT_TABLES.concat(['Clients', 'Employees']).forEach(function (table) {
+    IMPORT_TABLES.concat(keepEntities ? [] : ['Clients', 'Employees']).forEach(function (table) {
       const sh = sheet_(table);
       const values = sh.getDataRange().getValues();
       const n = values[0].map(String).indexOf('notes');
