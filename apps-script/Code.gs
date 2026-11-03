@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-05.1';
+const API_VERSION = '2026-11-06.1';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -120,6 +120,7 @@ const DEFAULT_SETTINGS = {
   employeeSource: null,
   imports: [],
   hiddenTabs: [],
+  mirror: { enabled: false, spreadsheetId: '', tab: 'Day Book' },
   leaveApprovers: [
     { email: 'abhishek@urbaneliving.in', scope: 'all' }, { email: 'digvijay@urbaneliving.in', scope: 'all' },
     { email: 'it@urbaneliving.in', scope: 'all' }, { email: 'vibhooti@urbaneliving.in', scope: 'sales' },
@@ -193,6 +194,7 @@ function route_(req) {
     case 'undoImport': return undoImport_(user, req.tag);
     case 'setHiddenTabs': return setHiddenTabs_(user, req.tabs);
     case 'setPhoto': return setPhoto_(user, req.photo);
+    case 'mirrorSyncAll': return mirrorSyncAll_(user);
     case 'guidesList': return { guides: guidesList_() };
     case 'guideSave': return guideSave_(user, req.guide);
     case 'guideDelete': return guideDelete_(user, req.id);
@@ -421,6 +423,7 @@ function saveRecord_(user, table, rec) {
     if (table === 'Employees' && rec.designation) syncDesignation_(user, '', rec.id, rec.designation);
     audit_(user, rowIdx < 0 ? 'create' : 'update', table, rec.id, summary_(rec));
     if (rowIdx < 0) notifyRecord_(table, rowToObj_(headers, row, types));
+    mirror_(table, rowToObj_(headers, row, types), 'upsert');
     return { record: rowToObj_(headers, row, types) };
   } finally {
     lock.releaseLock();
@@ -447,6 +450,7 @@ function removeRecord_(user, table, id) {
         const old = rowToObj_(headers, values[i], types_(table));
         sh.deleteRow(i + 1);
         audit_(user, 'delete', table, id, summary_(old));
+        mirror_(table, old, 'delete');
         return {};
       }
     }
@@ -513,7 +517,7 @@ function removeMany_(user, table, ids) {
     const idCol = values[0].map(String).indexOf('id');
     for (let i = values.length - 1; i >= 1; i--) {
       const id = String(values[i][idCol]);
-      if (ids.indexOf(id) >= 0 && !blocked[id]) { sh.deleteRow(i + 1); removed++; }
+      if (ids.indexOf(id) >= 0 && !blocked[id]) { sh.deleteRow(i + 1); removed++; mirror_(table, { id: id }, 'delete'); }
     }
   } finally {
     lock.releaseLock();
@@ -643,6 +647,7 @@ function readSettings_() {
       if (r.key === 'company') s.company = Object.assign(s.company, v);
       else if (r.key === 'employeeSource') s.employeeSource = v;
       else if (r.key === 'attendance') s.attendance = Object.assign(s.attendance, v);
+      else if (r.key === 'mirror') s.mirror = Object.assign(s.mirror, v);
       else if (r.key === 'estimateCounter') s.estimateCounter = Number(v) || s.estimateCounter;
       else if (r.key === 'estimateTemplate') s.estimateTemplate = v;
       else if ((r.key === 'imports' || r.key === 'hiddenTabs' || r.key === 'leaveApprovers') && Array.isArray(v)) s[r.key] = v;
@@ -681,6 +686,13 @@ function saveSettings_(user, settings) {
   if ('estimateCounter' in settings) {
     if (user.role !== 'Admin') throw err_('Only Admin can change the estimate counter', 'FORBIDDEN');
     entries.push(['estimateCounter', Math.max(0, Math.floor(Number(settings.estimateCounter) || 0))]);
+  }
+  if (settings.mirror) {
+    const m = settings.mirror;
+    const id = (String(m.spreadsheetId || '').match(/\/d\/([a-zA-Z0-9-_]+)/) || [])[1] || String(m.spreadsheetId || '').trim();
+    const cfg = { enabled: !!m.enabled && !!id, spreadsheetId: id, tab: String(m.tab || 'Day Book').trim().slice(0, 80) || 'Day Book' };
+    if (cfg.enabled) mirrorSheet_(cfg);
+    entries.push(['mirror', cfg]);
   }
   if (settings.leaveApprovers) {
     if (user.role !== 'Admin') throw err_('Only Admin can change leave approvers', 'FORBIDDEN');
@@ -1194,6 +1206,84 @@ function estimateLinkClient_(user, estimateNo, clientId) {
 /** Run once from the editor after updating, so the script may store files in Google Drive. */
 function authorizeDrive() {
   Logger.log('Drive access OK. Documents folder: ' + docsFolder_().getName());
+}
+
+// ---------------------------------------------------------------------------
+// Accountant's own spreadsheet: every money entry made in the app is also
+// written to a Day Book tab there (Date | DR | CR | Narration | Remarks |
+// App Ref). Edits update the same line, deletes remove it. Rows that came
+// from the Day Book import are not written back. The script owner needs edit
+// access to that spreadsheet.
+// ---------------------------------------------------------------------------
+const MIRROR_TABLES = ['ClientPayments', 'ClientWork', 'OfficeExpenses', 'SalaryAdvances', 'SalaryPayments'];
+const MIRROR_HEAD = ['Date', 'DR', 'CR', 'Narration', 'Remarks', 'App Ref'];
+
+function mirrorSheet_(cfg) {
+  let ss;
+  try { ss = SpreadsheetApp.openById(cfg.spreadsheetId); } catch (e) {
+    throw err_('Cannot open the accountant\'s spreadsheet. Share it (Editor) with the Google account that owns this Apps Script, and check the link.');
+  }
+  let sh = ss.getSheetByName(cfg.tab);
+  if (!sh) {
+    sh = ss.insertSheet(cfg.tab);
+    sh.getRange(1, 1, 1, MIRROR_HEAD.length).setValues([MIRROR_HEAD]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  const lastCol = Math.max(sh.getLastColumn(), 1);
+  const head = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+  let refCol = head.indexOf('App Ref') + 1;
+  if (!refCol) { refCol = Math.max(lastCol, 5) + 1; sh.getRange(1, refCol).setValue('App Ref').setFontWeight('bold'); }
+  return { sh: sh, refCol: refCol, name: ss.getName() };
+}
+
+function mirrorRow_(table, r) {
+  const client = function (id) { const c = readTable_('Clients').filter(function (x) { return x.id === id; })[0]; return c ? c.name : ''; };
+  const emp = function (id) { const e = readTable_('Employees').filter(function (x) { return x.id === id; })[0]; return e ? e.name : ''; };
+  const pay = function (x) { return [x.mode, x.reference || x.billNo].filter(String).join(' '); };
+  switch (table) {
+    case 'ClientPayments': return [r.date, '', Number(r.amount) || 0, 'Received from ' + client(r.clientId) + (pay(r) ? ' (' + pay(r) + ')' : ''), client(r.clientId)];
+    case 'ClientWork': return [r.date, Number(r.amount) || 0, '', [r.costType, r.description, r.vendor].filter(String).join(' — '), client(r.clientId) + ' Site'];
+    case 'OfficeExpenses': return [r.date, Number(r.amount) || 0, '', [r.description || r.category, r.paidTo].filter(String).join(' — ') + (r.mode ? ' (' + r.mode + ')' : ''), r.category];
+    case 'SalaryAdvances': return [r.date, Number(r.amount) || 0, '', emp(r.employeeId) + ' advance' + (r.mode ? ' (' + r.mode + ')' : ''), emp(r.employeeId) + ' Advance'];
+    case 'SalaryPayments': return [r.paidDate, Number(r.paidAmount) || 0, '', emp(r.employeeId) + ' salary for ' + r.salaryMonth + (r.mode ? ' (' + r.mode + ')' : ''), emp(r.employeeId) + ' Salary'];
+  }
+  return null;
+}
+
+function mirror_(table, r, op) {
+  if (MIRROR_TABLES.indexOf(table) < 0) return;
+  const cfg = readSettings_().mirror;
+  if (!cfg.enabled || !cfg.spreadsheetId) return;
+  if (op !== 'delete' && /\[import:/.test(r.notes || '')) return;
+  try {
+    const m = mirrorSheet_(cfg);
+    const last = m.sh.getLastRow();
+    const refs = last > 1 ? m.sh.getRange(2, m.refCol, last - 1, 1).getValues().map(function (x) { return String(x[0]); }) : [];
+    const at = refs.indexOf(r.id);
+    if (op === 'delete') {
+      if (at >= 0) m.sh.deleteRow(at + 2);
+      return;
+    }
+    const row = mirrorRow_(table, r);
+    if (!row) return;
+    const target = at >= 0 ? at + 2 : last + 1;
+    m.sh.getRange(target, 1, 1, 5).setValues([row]);
+    m.sh.getRange(target, m.refCol).setValue(r.id);
+  } catch (e) {
+    audit_({ email: 'system' }, 'accountant sheet failed', table, r.id, String(e && e.message || e).slice(0, 200));
+  }
+}
+
+function mirrorSyncAll_(user) {
+  needRole_(user, WRITE_ROLES);
+  const cfg = readSettings_().mirror;
+  if (!cfg.enabled) throw err_('Turn on the accountant sheet first');
+  let n = 0;
+  MIRROR_TABLES.forEach(function (t) {
+    readTable_(t).forEach(function (r) { if (!/\[import:/.test(r.notes || '')) { mirror_(t, r, 'upsert'); n++; } });
+  });
+  audit_(user, 'sync', 'Accountant sheet', '', n + ' entries');
+  return { synced: n };
 }
 
 // ---------------------------------------------------------------------------

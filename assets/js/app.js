@@ -2777,7 +2777,7 @@
   function viewSettings() {
     const st = ui('settings');
     const items = [['profile', 'My profile'], ['guide', 'Rules & Guides']];
-    if (canWrite()) items.push(['lists', 'Dropdown lists'], ['duplicates', 'Duplicates', findDuplicates().length]);
+    if (canWrite()) items.push(['lists', 'Dropdown lists'], ['accsheet', 'Accountant sheet'], ['duplicates', 'Duplicates', findDuplicates().length]);
     if (isAdmin()) items.push(['members', 'Members', S.users.length], ['company', 'Company'], ['attendance', 'Attendance'], ['notifications', 'Notifications'], ['import', 'Import data'], ['activity', 'Activity log']);
     if (!items.some((i) => i[0] === st.tab)) st.tab = 'profile';
     let h = pageHead('Settings', '');
@@ -2823,6 +2823,21 @@
         '<label class="field">Last estimate counter<input class="input" name="estimateCounter" type="number" value="' + esc(S.settings.estimateCounter) + '"><span class="field-hint">The next estimate gets this + 1. Set it above the last number used on the old estimate page.</span></label>' +
         (S.settings.estimateTemplate ? '<button type="button" class="btn sm" data-act="tpl-reset" style="align-self:flex-start">Reset estimate template to default</button>' : '') +
         '</div></div></div><button class="btn primary" type="submit">Save</button></form>';
+    } else if (st.tab === 'accsheet') {
+      const m = S.settings.mirror || {};
+      h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Accountant’s own spreadsheet</h2>' + (m.enabled ? '<span class="badge good">On</span>' : '<span class="badge">Off</span>') + '</div><div class="card-body">' +
+        '<p class="muted" style="margin-top:0">Two spreadsheets work together:</p><ul class="small" style="line-height:1.7;margin-top:0">' +
+        '<li><b>Office data</b> — the dashboard’s own Google Sheet. Everything entered here is saved there straight away.</li>' +
+        '<li><b>Accountant’s sheet</b> — the accountant’s personal workbook. Every payment, site cost, office expense, advance and salary entered in the dashboard is also written to its <b>Day Book</b> tab (Date · DR · CR · Narration · Remarks). Editing or deleting an entry in the dashboard updates or removes the same line.</li></ul>' +
+        '<form id="mirror-form" style="display:flex;flex-direction:column;gap:12px">' +
+        '<label class="field">Spreadsheet link<input class="input" name="spreadsheetId" placeholder="https://docs.google.com/spreadsheets/d/…" value="' + esc(m.spreadsheetId ? 'https://docs.google.com/spreadsheets/d/' + m.spreadsheetId + '/edit' : '') + '"><span class="field-hint">Share this spreadsheet as <b>Editor</b> with the Google account that owns the dashboard’s Apps Script.</span></label>' +
+        '<label class="field">Tab name<input class="input" name="tab" value="' + esc(m.tab || 'Day Book') + '"><span class="field-hint">Created if it doesn’t exist. An “App Ref” column is added so lines can be updated later.</span></label>' +
+        '<label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" name="enabled"' + (m.enabled ? ' checked' : '') + '> Write dashboard entries to this spreadsheet</label>' +
+        '<div class="sp"><button class="btn primary" type="submit">Save &amp; test</button>' + (m.enabled ? '<button class="btn" type="button" data-act="mirror-sync">Copy existing entries</button>' : '') + '</div></form>' +
+        '</div></div><div class="card"><div class="card-head"><h2>Notes</h2></div><div class="card-body small" style="line-height:1.7">' +
+        '<p style="margin-top:0">• Entries that came from the Day Book import are not written back, so nothing is doubled.</p>' +
+        '<p>• “Copy existing entries” writes every entry already made in the dashboard (not the imported ones) — safe to run again, lines are matched by App Ref.</p>' +
+        '<p style="margin-bottom:0">• Employee expense claims are not cash, so they are not written; they reach the Day Book as part of the salary payment.</p></div></div></div>';
     } else if (st.tab === 'notifications') {
       const n = S.settings.notifications || { events: {}, managers: [] };
       const EV = [
@@ -2905,6 +2920,20 @@
           S.settings = r.settings;
           toast('Company settings saved');
         } catch (ex) { toast(ex.message, true); }
+      });
+    }
+    if (st.tab === 'accsheet') {
+      $('#mirror-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = e.target.elements;
+        const btn = $('button[type=submit]', e.target);
+        btn.disabled = true;
+        try {
+          const r = await api('saveSettings', { settings: { mirror: { spreadsheetId: fd.spreadsheetId.value, tab: fd.tab.value, enabled: fd.enabled.checked } } });
+          S.settings = r.settings;
+          toast(r.settings.mirror.enabled ? 'Connected — new entries will be written to “' + r.settings.mirror.tab + '”' : 'Saved (writing is off)');
+          renderPage();
+        } catch (ex) { toast(ex.message, true); btn.disabled = false; }
       });
     }
     if (st.tab === 'notifications') {
@@ -3172,6 +3201,12 @@
         break;
       case 'dup-run': runDuplicates(el); break;
       case 'leave-new': openLeaveForm(); break;
+      case 'mirror-sync':
+        if (!confirm('Write every dashboard entry (not the imported ones) to the accountant’s sheet?')) break;
+        el.disabled = true;
+        try { const r = await api('mirrorSyncAll'); toast(r.synced + ' entries written to the accountant’s sheet'); } catch (err) { toast(err.message, true); }
+        el.disabled = false;
+        break;
       case 'apv-add': $('#apv-list').insertAdjacentHTML('beforeend', approverRow({ email: '', scope: 'all' })); break;
       case 'apv-del': el.closest('[data-apv]').remove(); break;
       case 'leave-cancel':
