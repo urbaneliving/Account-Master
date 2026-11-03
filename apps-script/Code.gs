@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-08.1';
+const API_VERSION = '2026-11-08.2';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -1436,7 +1436,7 @@ function classifyLine_(line, rules) {
     if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Money in from an employee' });
     let k = rule.action === 'staff' ? null : rule.action;
     if (!k) k = /advance|adv\b|imprest/.test(both) ? 'advance' : /salary|salry|full and final|conveyance|kkbk/.test(both) ? 'salary' : rule.fallback;
-    return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: salaryMonthOf_(line.date, k === 'advance' ? 12 : 20) });
+    return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: k === 'advance' ? line.date.slice(0, 7) : salaryMonthOf_(line.date, 20) });
   }
   if (rule && rule.action === 'site') return Object.assign(base, { kind: dir === 'in' ? 'ignore' : 'site', client: rule.target || 'Unassigned site work', costType: rule.costType || costTypeOf_(both, narr) });
   if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Receipt with no matching client rule' });
@@ -1692,7 +1692,6 @@ function applyLine_(user, c, ref) {
 // employee (CR) are skipped — those come from the Day Book.
 // ---------------------------------------------------------------------------
 const EXPENSE_TAB_SKIP = /\bsir\b|daily work|details|office exp|^sheet\s*\d*$|salary sheet|day ?book/i;
-const MONTHS_ = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 
 function cellDate_(v) {
   if (v instanceof Date) return isNaN(v) ? '' : Utilities.formatDate(v, TZ, 'yyyy-MM-dd');
@@ -1730,14 +1729,7 @@ function parseExpenseTab_(tab, defaultRate) {
   if (last < 2) return [];
   const v = sh.getRange(1, 1, last, width).getValues();
   const lines = [];
-  let blockMonth = '';
   v.forEach(function (row) {
-    // A title like "Divya Exp Sheet ( Oct - 26 )" sets the salary month of the lines below it.
-    row.forEach(function (cell) {
-      if (typeof cell !== 'string') return;
-      const m = cell.toLowerCase().match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*[-'’]?\s*(\d{2}|\d{4})\b/);
-      if (m && /sheet|exp|conve/i.test(cell)) blockMonth = (m[2].length === 2 ? '20' + m[2] : m[2]) + '-' + ('0' + (MONTHS_.indexOf(m[1]) + 1)).slice(-2);
-    });
     for (let c = 0; c < row.length; c++) {
       const date = cellDate_(row[c]);
       if (!date) continue;
@@ -1760,7 +1752,7 @@ function parseExpenseTab_(tab, defaultRate) {
       }
       if (!line || !(line.amount > 0)) continue;
       line.date = date;
-      line.salaryMonth = blockMonth && Math.abs(new Date(date + 'T00:00:00') - new Date(blockMonth + '-15T00:00:00')) < 50 * 86400000 ? blockMonth : date.slice(0, 7);
+      line.salaryMonth = date.slice(0, 7); // month-wise: a line counts in the month of its own date
       lines.push(line);
     }
   });
