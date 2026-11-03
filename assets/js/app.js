@@ -904,7 +904,7 @@
     h += '<div class="kpis">' +
       '<a href="#/estimates" style="color:inherit">' + kpi('Estimates given', String(ests.length), inr(sum(ests, 'grandTotal')) + ' quoted') + '</a>' +
       kpi('Estimates approved', inr(sum(ests.filter((r) => r.status === 'Approved'), 'grandTotal')), plural(ests.filter((r) => r.status === 'Approved').length, 'estimate'), 'good') +
-      (['Admin', 'Accountant'].includes(S.user.role) ? '<a href="#/attendance" style="color:inherit">' + kpi('In office today', (S.todayCount === undefined ? '…' : S.todayCount) + ' / ' + activeUsers, 'Members marked present') + '</a>' : '') +
+      (isAdmin() ? '<a href="#/attendance" style="color:inherit">' + kpi('In office today', (S.todayCount === undefined ? '…' : S.todayCount) + ' / ' + activeUsers, 'Members marked present') + '</a>' : '') +
       '</div>';
 
     h += '<div class="two-col">';
@@ -949,7 +949,7 @@
     return h;
   }
   viewDashboard.after = function () {
-    if (['Admin', 'Accountant'].includes(S.user.role) && S.todayFetched !== today()) {
+    if (isAdmin() && S.todayFetched !== today()) {
       S.todayFetched = today();
       api('attendanceList', { from: today(), to: today() }).then((r) => {
         S.todayCount = r.rows.filter((x) => ['Present', 'Late', 'Half Day'].includes(x.status)).length;
@@ -1188,7 +1188,7 @@
     const emps = rows('Employees');
     let h = pageHead('Employees & salary', 'Salary = base + expenses − advances − deductions + bonus',
       addBtn('Employees', 'Add employee') + (canWrite() ? '<button class="btn" data-act="add" data-t="SalaryAdvances">' + icon('plus') + 'Give advance</button>' : ''));
-    h += tabs('salary', [['sheet', 'Salary sheet'], ['employees', 'Employees', emps.length], ['advances', 'Advances', rows('SalaryAdvances').length], ['history', 'Payment history', rows('SalaryPayments').length]], 'sheet');
+    h += tabs('salary', [['sheet', 'Salary sheet'], ['employees', 'Employees', emps.length], ['expenses', 'Expenses', rows('EmployeeExpenses').filter((x) => x.salaryMonth === st.month).length], ['advances', 'Advances', rows('SalaryAdvances').length], ['history', 'Payment history', rows('SalaryPayments').length]], 'sheet');
 
     if (st.tab === 'sheet') {
       const sal = salaryEmployees(st.month).map((e) => Object.assign({ id: e.id }, salaryFor(e, st.month)));
@@ -1233,6 +1233,40 @@
         { k: 'monthlySalary', l: 'Monthly salary', r: true, total: true, v: (e) => num(e.monthlySalary), f: (e) => inr(e.monthlySalary) },
         { k: 'status', l: 'Status', f: (e) => statusBadge(e.status) },
       ], list_, { onRow: 'open-emp', actions: (e) => rowActions('Employees', e), name: 'Employees', sort: { k: 'name', dir: 'asc' }, empty: 'No employees yet' }) + '</div>';
+    } else if (st.tab === 'expenses') {
+      const rate = num(S.settings.company.perKmRate) || 3;
+      const monthExp = rows('EmployeeExpenses').filter((x) => x.salaryMonth === st.month);
+      const list_ = monthExp.filter((x) => (!st.emp || x.employeeId === st.emp) && matchQ('salary', empName(x.employeeId), x.expenseType, x.fromTo, x.notes));
+      const per = {};
+      monthExp.forEach((x) => {
+        const o = per[x.employeeId] = per[x.employeeId] || { id: x.employeeId, km: 0, conv: 0, other: 0, n: 0, tabs: {} };
+        if (num(x.km)) { o.km += num(x.km); o.conv += num(x.amount); } else o.other += num(x.amount);
+        o.n++;
+        const tab = (String(x.notes || '').match(/From the "([^"]+)" tab/) || [])[1];
+        if (tab) o.tabs[tab] = true;
+      });
+      const sumRows = Object.values(per).map((o) => Object.assign(o, { name: empName(o.id), total: o.conv + o.other }));
+      h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month">' + searchFilter('salary', 'Search expenses…') +
+        selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + addBtn('EmployeeExpenses', 'Add expense', { salaryMonth: st.month }) + csvBtn('sal-exp') + '</div>';
+      h += '<div class="kpis">' + kpi('Total expenses', inr(sum(monthExp, 'amount')), fmtMonth(st.month)) +
+        kpi('Conveyance (bike)', inr(sumRows.reduce((a, o) => a + o.conv, 0)), sumRows.reduce((a, o) => a + o.km, 0).toLocaleString('en-IN') + ' km × ' + inr(rate)) +
+        kpi('Other expenses', inr(sumRows.reduce((a, o) => a + o.other, 0)), 'Food, cab, material…') +
+        kpi('Employees', String(sumRows.length), 'with expenses this month') + '</div>';
+      h += '<p class="small muted" style="margin:0 0 10px">Expenses are added to the salary of their month. Lines written in each employee’s own tab of the Google Sheet (e.g. “Divya Singh”, “Archit Conve Sheet”) come here automatically: Date · Particulars · Dr amount, or Date · KM · Rate for conveyance. Advances and salary in those tabs are skipped — they come from the Day Book.</p>';
+      h += '<div class="card" style="margin-bottom:16px"><div class="card-head"><h2>Per employee · ' + esc(fmtMonth(st.month)) + '</h2></div>' + dataTable('sal-exp-sum', [
+        { k: 'name', l: 'Employee', primary: true, f: (o) => '<a href="#/employees/' + encodeURIComponent(o.id) + '"><b>' + esc(o.name) + '</b></a><div class="cell-sub">' + esc(Object.keys(o.tabs).map((t) => 'Sheet: ' + t).join(', ')) + '</div>' },
+        { k: 'km', l: 'KM', r: true, total: true, v: (o) => o.km, f: (o) => o.km ? o.km.toLocaleString('en-IN') : '' },
+        { k: 'conv', l: 'Conveyance', r: true, total: true, v: (o) => o.conv, f: (o) => o.conv ? inr(o.conv) : '' },
+        { k: 'other', l: 'Other expenses', r: true, total: true, v: (o) => o.other, f: (o) => o.other ? inr(o.other) : '' },
+        { k: 'total', l: 'Total (added to salary)', r: true, total: true, v: (o) => o.total, f: (o) => '<b>' + inr(o.total) + '</b>' },
+      ], sumRows, { name: 'Expenses per employee', sort: { k: 'total', dir: 'desc' }, empty: 'No expenses for this month' }) + '</div>';
+      h += '<div class="card">' + dataTable('sal-exp', [
+        { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },
+        { k: 'employee', l: 'Employee', primary: true, v: (r) => empName(r.employeeId), f: (r) => '<b>' + esc(empName(r.employeeId)) + '</b><div class="cell-sub">' + esc(r.expenseType) + '</div>' },
+        { k: 'details', l: 'Particulars', v: (r) => r.fromTo, f: (r) => esc([r.fromTo, r.clientId && 'Site: ' + clientName(r.clientId)].filter(Boolean).join(' · ')) },
+        { k: 'km', l: 'KM × rate', r: true, v: (r) => num(r.km), f: (r) => r.km ? esc(r.km) + ' × ' + inr(r.rate) : '' },
+        { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
+      ], list_, { actions: (r) => rowActions('EmployeeExpenses', r), name: 'Employee expenses ' + st.month, sort: { k: 'date', dir: 'asc' }, empty: 'No expenses for this month' }) + '</div>';
     } else if (st.tab === 'advances') {
       const adv = rows('SalaryAdvances').filter((a) => (!st.emp || a.employeeId === st.emp) && matchQ('salary', empName(a.employeeId), a.notes));
       h += '<div class="filters">' + searchFilter('salary', 'Search…') + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('advances') + '</div>';
@@ -2067,7 +2101,7 @@
   function viewAttendance() {
     const st = ui('attendance');
     if (!st.month) st.month = thisMonth();
-    const team = ['Admin', 'Accountant'].includes(S.user.role);
+    const team = isAdmin();
     const t = S.attendanceToday;
     const ips = S.ips;
     const inOffice = ips && ips.list.some(ipAllowed);
@@ -2789,19 +2823,20 @@
     const m = S.settings.mirror || {};
     const rules = S.settings.dayBookRules || S.defaultRules || [];
     let h = '<div class="card" style="margin-bottom:16px"><div class="card-body"><h2 style="margin:0 0 8px">How it works</h2>' +
-      '<div class="flow"><div><b>📒 Accountant’s Google Sheet</b><div class="small muted">Day Book tab: Date · DR · CR · Narration · Remarks</div></div>' +
+      '<div class="flow"><div><b>📒 Accountant’s Google Sheet</b><div class="small muted">Day Book (Date · DR · CR · Narration · Remarks), Salary Sheet, each employee’s expense tab</div></div>' +
       '<div class="arrows"><span>' + (m.readEnabled ? '✅' : '⏸') + ' Sheet → Dashboard</span><span>' + (m.enabled ? '✅' : '⏸') + ' Dashboard → Sheet</span></div>' +
       '<div><b>📊 Dashboard (office data)</b><div class="small muted">Clients, office, salary, dashboard totals</div></div></div>' +
       '<ul class="small" style="line-height:1.8;margin:12px 0 0">' +
       '<li><b>Sheet → Dashboard:</b> every line the accountant writes in the Day Book is read automatically (when anyone opens the dashboard, and every 15 minutes if auto sync is on) and sorted by the rules below into client payments, site costs, office expenses, advances and salary. If a line is changed or deleted in the sheet, the dashboard follows.</li>' +
       '<li><b>Dashboard → Sheet:</b> every payment, site cost, office expense, advance or salary entered in the dashboard is written to the Day Book too, so the accountant’s book stays complete.</li>' +
       '<li>Salaries and designations are also read from the <b>Salary Sheet</b> tab (latest month).</li></ul></div></div>';
-    h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Connection</h2>' + (m.readEnabled || m.enabled ? '<span class="badge good">Connected</span>' : '<span class="badge">Not connected</span>') + '</div><div class="card-body">' +
+    h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Connection</h2>' + (m.readEnabled || m.enabled ? '<span class="badge good">' + (m.spreadsheetId ? 'Connected' : 'On · same office sheet') + '</span>' : '<span class="badge">Off</span>') + '</div><div class="card-body">' +
       '<form id="mirror-form" style="display:flex;flex-direction:column;gap:12px">' +
-      '<label class="field">Accountant’s spreadsheet link<input class="input" name="spreadsheetId" placeholder="https://docs.google.com/spreadsheets/d/…" value="' + esc(m.spreadsheetId ? 'https://docs.google.com/spreadsheets/d/' + m.spreadsheetId + '/edit' : '') + '"><span class="field-hint">In that sheet: Share → add the Google account that owns the dashboard’s Apps Script → Editor.</span></label>' +
+      '<label class="field">Accountant’s spreadsheet link (optional)<input class="input" name="spreadsheetId" placeholder="Empty = Day Book tab of this same office sheet" value="' + esc(m.spreadsheetId ? 'https://docs.google.com/spreadsheets/d/' + m.spreadsheetId + '/edit' : '') + '"><span class="field-hint">Leave empty when the Day Book, Salary Sheet and employee expense tabs are in the office Google Sheet (as now). Only for a separate file: paste its link and Share it (Editor) with the Google account that owns the Apps Script.</span></label>' +
       '<label class="field">Day Book tab name<input class="input" name="tab" value="' + esc(m.tab || 'Day Book') + '"></label>' +
       '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="readEnabled"' + (m.readEnabled ? ' checked' : '') + '> <b>Sheet → Dashboard</b>: read the Day Book into the dashboard</label>' +
       '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="enabled"' + (m.enabled ? ' checked' : '') + '> <b>Dashboard → Sheet</b>: write dashboard entries into the Day Book</label>' +
+      '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="expenseTabs"' + (m.expenseTabs !== false ? ' checked' : '') + '> <b>Employee expense tabs</b>: read each employee’s own tab (Divya Singh, Archit Conve Sheet, Ayush…) into Employees &amp; salary → Expenses</label>' +
       '<div class="sp"><button class="btn primary" type="submit">Save &amp; connect</button>' +
       (m.readEnabled ? '<button class="btn" type="button" data-act="daybook-sync">' + icon('refresh') + 'Sync now</button><button class="btn" type="button" data-act="daybook-preview">Preview</button>' : '') +
       (m.enabled ? '<button class="btn" type="button" data-act="mirror-sync">Copy dashboard entries to sheet</button>' : '') + '</div></form>' +
@@ -2826,7 +2861,7 @@
       const btn = $('button[type=submit]', e.target);
       btn.disabled = true;
       try {
-        const r = await api('saveSettings', { settings: { mirror: { spreadsheetId: fd.spreadsheetId.value, tab: fd.tab.value, enabled: fd.enabled.checked, readEnabled: fd.readEnabled.checked } } });
+        const r = await api('saveSettings', { settings: { mirror: { spreadsheetId: fd.spreadsheetId.value, tab: fd.tab.value, enabled: fd.enabled.checked, readEnabled: fd.readEnabled.checked, expenseTabs: fd.expenseTabs.checked } } });
         S.settings = r.settings;
         toast('Connected');
         if (r.settings.mirror.readEnabled) await runDayBookSync(true);
@@ -3674,7 +3709,7 @@
           if (req.kind === 'in') return { ok: true, record: r, action: 'already' };
           r.checkOut = t; save(); return { ok: true, record: r, action: 'out' };
         }
-        case 'attendanceList': return { ok: true, rows: (db.attendance || []).filter((x) => x.date >= req.from && x.date <= req.to && (['Admin', 'Accountant'].includes(user.role) || x.email === user.email)) };
+        case 'attendanceList': return { ok: true, rows: (db.attendance || []).filter((x) => x.date >= req.from && x.date <= req.to && (user.role === 'Admin' || x.email === user.email)) };
         case 'attendanceSave': {
           const t = db.users.find((u) => u.email === req.record.email);
           let r = db.attendance.find((x) => x.email === t.email && x.date === req.record.date);

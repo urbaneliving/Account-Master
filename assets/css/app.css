@@ -500,3 +500,10 @@ textarea.ainput { resize: vertical; display: block; }
 .ge-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .ge-step { margin: 12px 0; background: var(--surface-2); }
 @media (max-width: 640px) { .ge-cols { grid-template-columns: 1fr; } }
+
+/* Accountant sheet: how-it-works diagram */
+.flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; }
+.flow > div:not(.arrows) { border: 1px solid var(--border, #e5e7eb); border-radius: 10px; padding: 12px; background: var(--surface-2, rgba(0,0,0,.02)); }
+.flow .arrows { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; text-align: center; }
+@media (max-width: 640px) { .flow { grid-template-columns: 1fr; } .flow .arrows { flex-direction: row; justify-content: center; flex-wrap: wrap; } }
+#mirror-form label[style*="display:flex"] { display: block !important; line-height: 1.5; }

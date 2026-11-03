@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-07.1';
+const API_VERSION = '2026-11-08.1';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -121,7 +121,7 @@ const DEFAULT_SETTINGS = {
   employeeSource: null,
   imports: [],
   hiddenTabs: [],
-  mirror: { enabled: false, spreadsheetId: '', tab: 'Day Book', readEnabled: false, lastSync: '', lastResult: '' },
+  mirror: { enabled: true, spreadsheetId: '', tab: 'Day Book', readEnabled: true, expenseTabs: true, lastSync: '', lastResult: '' },
   dayBookRules: null,
   leaveApprovers: [
     { email: 'abhishek@urbaneliving.in', scope: 'all' }, { email: 'digvijay@urbaneliving.in', scope: 'all' },
@@ -697,8 +697,8 @@ function saveSettings_(user, settings) {
     const m = settings.mirror;
     const id = (String(m.spreadsheetId || '').match(/\/d\/([a-zA-Z0-9-_]+)/) || [])[1] || String(m.spreadsheetId || '').trim();
     const old = readSettings_().mirror;
-    const cfg = { enabled: !!m.enabled && !!id, readEnabled: !!m.readEnabled && !!id, spreadsheetId: id, tab: String(m.tab || 'Day Book').trim().slice(0, 80) || 'Day Book', lastSync: old.lastSync || '', lastResult: old.lastResult || '' };
-    if (cfg.enabled || cfg.readEnabled) mirrorSheet_(cfg);
+    const cfg = { enabled: !!m.enabled, readEnabled: !!m.readEnabled, expenseTabs: m.expenseTabs !== false, spreadsheetId: id, tab: String(m.tab || 'Day Book').trim().slice(0, 80) || 'Day Book', lastSync: old.lastSync || '', lastResult: old.lastResult || '' };
+    if (id && (cfg.enabled || cfg.readEnabled)) mirrorSheet_(cfg);
     entries.push(['mirror', cfg]);
   }
   if ('dayBookRules' in settings) {
@@ -881,7 +881,19 @@ function linkedEmployee_(user) {
   }
   const email = String(user.email).toLowerCase();
   return emps.filter(function (x) { return x.email && String(x.email).toLowerCase() === email; })[0] ||
-    emps.filter(function (x) { return String(x.name).trim().toLowerCase() === String(user.name).trim().toLowerCase(); })[0] || null;
+    emps.filter(function (x) { return String(x.name).trim().toLowerCase() === String(user.name).trim().toLowerCase(); })[0] ||
+    byFirstName_(emps, user.name) || null;
+}
+
+// "Saban Jha" (login) ↔ "Saban Kumar Jha" (employee): same first name, and only one such employee.
+function byFirstName_(emps, name) {
+  const words = String(name || '').trim().toLowerCase().split(/\s+/);
+  if (!words[0] || words[0].length < 3) return null;
+  const hits = emps.filter(function (x) {
+    const w = String(x.name).trim().toLowerCase().split(/\s+/);
+    return w[0] === words[0] && (words.length < 2 || w.length < 2 || w[w.length - 1] === words[words.length - 1]);
+  });
+  return hits.length === 1 ? hits[0] : null;
 }
 
 function mySelf_(user) {
@@ -910,7 +922,7 @@ function setPhoto_(user, photo) {
 // Estimates. Each save is a row: version 1 is the original, later versions are
 // updates (history is kept). Sections/specs/terms are stored as JSON in "data".
 // ---------------------------------------------------------------------------
-function canSeeAllEstimates_(user) { return ACCOUNTS_ROLES.indexOf(user.role) >= 0; }
+function canSeeAllEstimates_(user) { return user.role === 'Admin'; }
 
 function estimateOwner_(rows, estimateNo) {
   const orig = rows.filter(function (r) { return r.estimateNo === estimateNo; })
@@ -1228,28 +1240,33 @@ function authorizeDrive() {
 const MIRROR_TABLES = ['ClientPayments', 'ClientWork', 'OfficeExpenses', 'SalaryAdvances', 'SalaryPayments'];
 const MIRROR_HEAD = ['Date', 'DR', 'CR', 'Narration', 'Remarks', 'App Ref'];
 
-function mirrorSheet_(cfg) {
+// Empty spreadsheetId = the Day Book is a tab of this same (office) spreadsheet.
+function mirrorSheet_(cfg, noCreate) {
   let ss;
-  try { ss = SpreadsheetApp.openById(cfg.spreadsheetId); } catch (e) {
+  try { ss = cfg.spreadsheetId ? SpreadsheetApp.openById(cfg.spreadsheetId) : ss_(); } catch (e) {
     throw err_('Cannot open the accountant\'s spreadsheet. Share it (Editor) with the Google account that owns this Apps Script, and check the link.');
   }
-  let sh = ss.getSheetByName(cfg.tab);
+  let sh = ss.getSheetByName(cfg.tab || 'Day Book');
   if (!sh) {
-    sh = ss.insertSheet(cfg.tab);
+    if (noCreate) return { sh: null, ss: ss, name: ss.getName() };
+    sh = ss.insertSheet(cfg.tab || 'Day Book');
     sh.getRange(1, 1, 1, MIRROR_HEAD.length).setValues([MIRROR_HEAD]).setFontWeight('bold');
     sh.setFrozenRows(1);
   }
   const lastCol = Math.max(sh.getLastColumn(), 1);
   const head = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
   let refCol = head.indexOf('App Ref') + 1;
-  if (!refCol) { refCol = Math.max(lastCol, 5) + 1; sh.getRange(1, refCol).setValue('App Ref').setFontWeight('bold'); }
+  if (!refCol) refCol = Math.max(lastCol, 5) + 1;
+  // App Ref + App Sync need two columns; a sheet may have none to spare.
+  if (sh.getMaxColumns() < refCol + 1) sh.insertColumnsAfter(sh.getMaxColumns(), refCol + 1 - sh.getMaxColumns());
+  if (head[refCol - 1] !== 'App Ref') sh.getRange(1, refCol).setValue('App Ref').setFontWeight('bold');
   return { sh: sh, refCol: refCol, name: ss.getName(), ss: ss };
 }
 
 function mirrorRow_(table, r) {
   const client = function (id) { const c = readTable_('Clients').filter(function (x) { return x.id === id; })[0]; return c ? c.name : ''; };
   const emp = function (id) { const e = readTable_('Employees').filter(function (x) { return x.id === id; })[0]; return e ? e.name : ''; };
-  const pay = function (x) { return [x.mode, x.reference || x.billNo].filter(String).join(' '); };
+  const pay = function (x) { return [x.mode, x.reference || x.billNo].filter(Boolean).join(' '); };
   switch (table) {
     case 'ClientPayments': return [r.date, '', Number(r.amount) || 0, 'Received from ' + client(r.clientId) + (pay(r) ? ' (' + pay(r) + ')' : ''), client(r.clientId)];
     case 'ClientWork': return [r.date, Number(r.amount) || 0, '', [r.costType, r.description, r.vendor].filter(String).join(' — '), client(r.clientId) + ' Site'];
@@ -1263,7 +1280,7 @@ function mirrorRow_(table, r) {
 function mirror_(table, r, op) {
   if (MIRROR_TABLES.indexOf(table) < 0) return;
   const cfg = readSettings_().mirror;
-  if (!cfg.enabled || !cfg.spreadsheetId) return;
+  if (!cfg.enabled) return;
   if (op !== 'delete' && /\[(import:|daybook)/.test(r.notes || '')) return;
   try {
     const m = mirrorSheet_(cfg);
@@ -1458,8 +1475,8 @@ function lineHash_(l) {
 
 function previewDayBook_() {
   const cfg = readSettings_().mirror;
-  if (!cfg.spreadsheetId) throw err_('Link the accountant\'s spreadsheet first');
-  const m = mirrorSheet_(cfg);
+  const m = mirrorSheet_(cfg, true);
+  if (!m.sh) throw err_('No "' + cfg.tab + '" tab found in the spreadsheet');
   const rules = dayBookRules_();
   return readDayBookLines_(m).filter(function (l) { return !l.ref || /^DB-/.test(l.ref); }).slice(-300).map(function (l) {
     const c = classifyLine_(l, rules);
@@ -1467,25 +1484,81 @@ function previewDayBook_() {
   });
 }
 
+// Run-scoped buffers so a full sync makes a handful of sheet calls instead of
+// thousands (Apps Script stops a run after 6 minutes).
+let RUN_ = null;
+function startRun_() {
+  const sal = {};
+  readTable_('SalaryPayments').forEach(function (p) { sal[p.id] = p; });
+  RUN_ = { adds: {}, dels: {}, sal: sal, salDirty: {}, salNew: {}, salDel: {}, named: {}, emps: null, cats: readSettings_().lists.officeCategories.slice(), catsChanged: false };
+}
+function runAdd_(table, o) { (RUN_.adds[table] = RUN_.adds[table] || []).push(o); }
+function runDel_(table, id) { (RUN_.dels[table] = RUN_.dels[table] || {})[id] = true; }
+
+function flushRun_(user) {
+  const run = RUN_;
+  Object.keys(run.salDel).forEach(function (id) { if (!run.salNew[id]) runDel_('SalaryPayments', id); });
+  Object.keys(run.dels).forEach(function (t) { removeIdsRaw_(t, Object.keys(run.dels[t])); });
+  Object.keys(run.salDirty).forEach(function (id) {
+    if (run.salDel[id] || run.salNew[id]) return;
+    const p = run.sal[id];
+    patchRow_('SalaryPayments', id, { paidAmount: p.paidAmount, netPayable: p.netPayable, paidDate: p.paidDate, updatedBy: user.email, updatedAt: new Date().toISOString() });
+  });
+  Object.keys(run.salNew).forEach(function (id) { if (!run.salDel[id]) runAdd_('SalaryPayments', run.sal[id]); });
+  Object.keys(run.adds).forEach(function (t) { appendMany_(t, run.adds[t]); });
+  RUN_ = null;
+  if (run.catsChanged) writeSettings_(user, [['list.officeCategories', run.cats]]);
+}
+
+function appendMany_(table, objs) {
+  if (!objs.length) return;
+  const sh = sheet_(table);
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  const types = types_(table);
+  const start = sh.getLastRow() + 1;
+  if (start + objs.length - 1 > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), objs.length + 50);
+  const formats = headers.map(function (k) { return types[k] ? numberFormat_(types[k]) : 'General'; });
+  sh.getRange(start, 1, objs.length, headers.length)
+    .setNumberFormats(objs.map(function () { return formats; }))
+    .setValues(objs.map(function (o) { return headers.map(function (k) { return toCell_(o[k], types[k]); }); }));
+}
+
 // Undo what a link did in the dashboard.
 function revertLink_(user, link) {
   if (!link.recordId) return;
   if (link.recordTable === 'SalaryPayments') {
-    const p = readTable_('SalaryPayments').filter(function (x) { return x.id === link.recordId; })[0];
+    const p = RUN_ ? RUN_.sal[link.recordId] : readTable_('SalaryPayments').filter(function (x) { return x.id === link.recordId; })[0];
     if (!p) return;
     const left = Math.round((Number(p.paidAmount) - Number(link.amount)) * 100) / 100;
+    if (RUN_) {
+      p.paidAmount = Math.max(0, left); p.netPayable = Math.max(0, left);
+      if (left <= 0 && /\[daybook\]/.test(p.notes || '')) RUN_.salDel[p.id] = true; else RUN_.salDirty[p.id] = true;
+      return;
+    }
     if (left <= 0 && /\[daybook\]/.test(p.notes || '')) removeIdsRaw_('SalaryPayments', [p.id]);
     else patchRow_('SalaryPayments', p.id, { paidAmount: Math.max(0, left), netPayable: Math.max(0, left) });
     return;
   }
-  removeIdsRaw_(link.recordTable, [link.recordId]);
+  if (RUN_) runDel_(link.recordTable, link.recordId);
+  else removeIdsRaw_(link.recordTable, [link.recordId]);
 }
 
+// Remove rows by id with one read and one write.
 function removeIdsRaw_(table, ids) {
+  if (!ids.length) return;
   const sh = sheet_(table);
   const values = sh.getDataRange().getValues();
   const idCol = values[0].map(String).indexOf('id');
-  for (let i = values.length - 1; i >= 1; i--) if (ids.indexOf(String(values[i][idCol])) >= 0) sh.deleteRow(i + 1);
+  const drop = {};
+  ids.forEach(function (id) { drop[String(id)] = true; });
+  const keep = values.slice(1).filter(function (r) { return !drop[String(r[idCol])]; });
+  if (keep.length === values.length - 1) return;
+  if (values.length - 1 - keep.length <= 3) {
+    for (let i = values.length - 1; i >= 1; i--) if (drop[String(values[i][idCol])]) sh.deleteRow(i + 1);
+    return;
+  }
+  sh.getRange(2, 1, values.length - 1, values[0].length).clearContent();
+  if (keep.length) sh.getRange(2, 1, keep.length, values[0].length).setValues(keep);
 }
 
 // Latest salary block of the accountant's "Salary Sheet" tab: first name → details.
@@ -1532,8 +1605,13 @@ function applySalarySheet_(user, info) {
 
 function ensureNamed_(user, table, name, extra) {
   const key = String(name).trim().toLowerCase();
-  const found = readTable_(table).filter(function (r) { return String(r.name).trim().toLowerCase() === key; })[0];
-  if (found) return found.id;
+  let map = RUN_ && RUN_.named[table];
+  if (!map) {
+    map = {};
+    readTable_(table).forEach(function (r) { const k = String(r.name).trim().toLowerCase(); if (!map[k]) map[k] = r.id; });
+    if (RUN_) RUN_.named[table] = map;
+  }
+  if (map[key]) return map[key];
   const now = new Date().toISOString();
   const o = Object.assign({ id: newId_(table === 'Clients' ? 'CL' : 'EM'), name: name, status: table === 'Clients' ? 'Ongoing' : 'Active', notes: 'Created from the Day Book ' + DAYBOOK_TAG, createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now }, extra || {});
   if (table === 'Clients') { const v = sheet_('Clients').getDataRange().getValues(); o.clientCode = nextCode_(v, v[0].map(String), 'clientCode', 'UL-C-'); }
@@ -1544,9 +1622,17 @@ function ensureNamed_(user, table, name, extra) {
     o.monthlySalary = s.salary || 0;
     if (s.designation) o.designation = s.designation;
     if (s.joiningDate) o.joiningDate = s.joiningDate;
+    if (RUN_) RUN_.emps = null;
   }
   appendObj_(table, o);
+  map[key] = o.id;
   return o.id;
+}
+
+function runEmployees_() {
+  if (!RUN_) return readTable_('Employees');
+  if (!RUN_.emps) RUN_.emps = readTable_('Employees');
+  return RUN_.emps;
 }
 
 // Apply one classified line; returns { recordTable, recordId, amount }.
@@ -1554,17 +1640,38 @@ function applyLine_(user, c, ref) {
   const now = new Date().toISOString();
   const meta = { createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now };
   const note = 'Day Book ' + ref + ' ' + DAYBOOK_TAG;
-  const add = function (table, o) { o.id = newId_(SCHEMA[table].prefix); appendObj_(table, Object.assign(o, meta)); return { recordTable: table, recordId: o.id, amount: c.amount }; };
+  const add = function (table, o) {
+    o.id = newId_(SCHEMA[table].prefix);
+    Object.assign(o, meta);
+    if (RUN_) runAdd_(table, o); else appendObj_(table, o);
+    return { recordTable: table, recordId: o.id, amount: c.amount };
+  };
   if (c.kind === 'payment') return add('ClientPayments', { date: c.date, clientId: ensureNamed_(user, 'Clients', c.client), amount: c.amount, mode: c.mode, reference: c.desc.slice(0, 200), notes: note });
   if (c.kind === 'site') return add('ClientWork', { date: c.date, clientId: ensureNamed_(user, 'Clients', c.client), costType: c.costType, description: c.desc.slice(0, 300), amount: c.amount, vendorPaid: 'Paid', notes: note });
   if (c.kind === 'office') {
-    const cats = readSettings_().lists.officeCategories;
-    if (cats.indexOf(c.category) < 0) writeSettings_(user, [['list.officeCategories', cats.concat([c.category])]]);
+    if (RUN_) { if (RUN_.cats.indexOf(c.category) < 0) { RUN_.cats.push(c.category); RUN_.catsChanged = true; } }
+    else { const cats = readSettings_().lists.officeCategories; if (cats.indexOf(c.category) < 0) writeSettings_(user, [['list.officeCategories', cats.concat([c.category])]]); }
     return add('OfficeExpenses', { date: c.date, category: c.category, amount: c.amount, mode: c.mode, description: c.desc.slice(0, 300), notes: note });
   }
   if (c.kind === 'advance') return add('SalaryAdvances', { date: c.date, employeeId: ensureNamed_(user, 'Employees', c.employee), amount: c.amount, mode: c.mode, salaryMonth: c.salaryMonth, notes: note + ' ' + c.desc.slice(0, 150) });
+  if (c.kind === 'expense') return add('EmployeeExpenses', { date: c.date, employeeId: c.employeeId, expenseType: c.expenseType, fromTo: c.desc.slice(0, 200), km: c.km || '', rate: c.rate || '', amount: c.amount, salaryMonth: c.salaryMonth, notes: 'From the "' + c.tab + '" tab ' + DAYBOOK_TAG });
   if (c.kind === 'salary') {
     const empId = ensureNamed_(user, 'Employees', c.employee);
+    if (RUN_) {
+      const all = RUN_.sal;
+      const p = Object.keys(all).map(function (k) { return all[k]; }).filter(function (x) { return x.employeeId === empId && x.salaryMonth === c.salaryMonth && !RUN_.salDel[x.id]; })[0];
+      if (p) {
+        p.paidAmount = Math.round((Number(p.paidAmount) + c.amount) * 100) / 100;
+        p.netPayable = Math.max(Number(p.netPayable) || 0, p.paidAmount);
+        if (c.date > p.paidDate) p.paidDate = c.date;
+        if (!RUN_.salNew[p.id]) RUN_.salDirty[p.id] = true;
+        return { recordTable: 'SalaryPayments', recordId: p.id, amount: c.amount };
+      }
+      const emp = runEmployees_().filter(function (x) { return x.id === empId; })[0] || {};
+      const o = Object.assign({ id: newId_('SP'), salaryMonth: c.salaryMonth, employeeId: empId, baseSalary: Number(emp.monthlySalary) || c.amount, expenses: 0, advances: 0, deduction: 0, bonus: 0, netPayable: c.amount, paidAmount: c.amount, paidDate: c.date, mode: c.mode, notes: note }, meta);
+      all[o.id] = o; RUN_.salNew[o.id] = true;
+      return { recordTable: 'SalaryPayments', recordId: o.id, amount: c.amount };
+    }
     const p = readTable_('SalaryPayments').filter(function (x) { return x.employeeId === empId && x.salaryMonth === c.salaryMonth; })[0];
     if (p) {
       const paid = Math.round((Number(p.paidAmount) + c.amount) * 100) / 100;
@@ -1577,60 +1684,188 @@ function applyLine_(user, c, ref) {
   return { recordTable: '', recordId: '', amount: c.amount };
 }
 
+// ---------------------------------------------------------------------------
+// Employee expense tabs ("Divya Singh", "Saban Jha Exp Sheet", "Archit Conve
+// Sheet", "Ayush", ...). Each tab whose first word is an employee's first name
+// is scanned for lines: Date | Particulars | Dr amount, or Date | KM | Rate
+// (conveyance, KM × rate). Advances, salary, totals and money given to the
+// employee (CR) are skipped — those come from the Day Book.
+// ---------------------------------------------------------------------------
+const EXPENSE_TAB_SKIP = /\bsir\b|daily work|details|office exp|^sheet\s*\d*$|salary sheet|day ?book/i;
+const MONTHS_ = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+function cellDate_(v) {
+  if (v instanceof Date) return isNaN(v) ? '' : Utilities.formatDate(v, TZ, 'yyyy-MM-dd');
+  const m = String(v || '').trim().match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})$/);
+  if (!m) return '';
+  const y = m[3].length === 2 ? '20' + m[3] : m[3];
+  if (Number(m[2]) > 12 || Number(m[1]) > 31) return '';
+  return y + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+}
+function cellNum_(v) {
+  if (v === '' || v === null || v === undefined || v instanceof Date) return null;
+  const n = Number(String(v).replace(/[₹,\s]/g, ''));
+  return isNaN(n) ? null : n;
+}
+function isText_(v) { return typeof v === 'string' && v.trim() !== '' && cellNum_(v) === null && !cellDate_(v); }
+
+function expenseTabs_(ss, dayBookTab) {
+  const emps = runEmployees_();
+  const out = [];
+  ss.getSheets().forEach(function (sh) {
+    const name = sh.getName();
+    if (name === dayBookTab || SCHEMA[name] || EXPENSE_TAB_SKIP.test(name)) return;
+    const first = name.trim().split(/\s+/)[0].toLowerCase();
+    if (first.length < 3) return;
+    const emp = emps.filter(function (e) { const f = String(e.name).trim().split(/\s+/)[0].toLowerCase(); return f === first || f.replace(/^aa/, 'a') === first.replace(/^aa/, 'a'); })[0];
+    if (emp) out.push({ sh: sh, name: name, emp: emp });
+  });
+  return out;
+}
+
+function parseExpenseTab_(tab, defaultRate) {
+  const sh = tab.sh;
+  const last = sh.getLastRow();
+  const width = Math.min(Math.max(sh.getLastColumn(), 1), 30);
+  if (last < 2) return [];
+  const v = sh.getRange(1, 1, last, width).getValues();
+  const lines = [];
+  let blockMonth = '';
+  v.forEach(function (row) {
+    // A title like "Divya Exp Sheet ( Oct - 26 )" sets the salary month of the lines below it.
+    row.forEach(function (cell) {
+      if (typeof cell !== 'string') return;
+      const m = cell.toLowerCase().match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*[-'’]?\s*(\d{2}|\d{4})\b/);
+      if (m && /sheet|exp|conve/i.test(cell)) blockMonth = (m[2].length === 2 ? '20' + m[2] : m[2]) + '-' + ('0' + (MONTHS_.indexOf(m[1]) + 1)).slice(-2);
+    });
+    for (let c = 0; c < row.length; c++) {
+      const date = cellDate_(row[c]);
+      if (!date) continue;
+      const a = row[c + 1], b = row[c + 2], d = row[c + 3], e = row[c + 4];
+      let line = null;
+      if (isText_(a)) {
+        const text = String(a).trim();
+        const km = cellNum_(b), rate = cellNum_(d);
+        if (km && rate && rate <= 20 && km > rate) { line = { desc: text, km: km, rate: rate, amount: cellNum_(e) || Math.round(km * rate) }; c += 4; }
+        else if (cellNum_(b)) { line = { desc: text, amount: cellNum_(b) }; c += 2; }
+        else { c += 3; continue; } // CR only (money given to the employee) or no amount
+        if (/advance|\badv\b|salary|total|imprest|^paid$|^done$/i.test(text)) continue;
+      } else if (cellNum_(a)) {
+        const km = cellNum_(a);
+        const rate = cellNum_(b) && cellNum_(b) <= 20 ? cellNum_(b) : defaultRate;
+        const amt = cellNum_(b) && cellNum_(b) <= 20 ? (cellNum_(d) || Math.round(km * rate)) : Math.round(km * rate);
+        const where = isText_(e) ? String(e).trim() : '';
+        line = { desc: 'Conveyance' + (where ? ' — ' + where : ''), km: km, rate: rate, amount: amt };
+        c += where ? 4 : 3;
+      }
+      if (!line || !(line.amount > 0)) continue;
+      line.date = date;
+      line.salaryMonth = blockMonth && Math.abs(new Date(date + 'T00:00:00') - new Date(blockMonth + '-15T00:00:00')) < 50 * 86400000 ? blockMonth : date.slice(0, 7);
+      lines.push(line);
+    }
+  });
+  return lines;
+}
+
+function expenseLines_(ss, dayBookTab) {
+  const rate = Number(readSettings_().company.perKmRate) || 3;
+  const out = [];
+  expenseTabs_(ss, dayBookTab).forEach(function (t) {
+    const seen = {};
+    parseExpenseTab_(t, rate).forEach(function (l) {
+      const sig = [t.name, l.date, l.desc, l.amount, l.km || ''].join('|');
+      seen[sig] = (seen[sig] || 0) + 1;
+      const key = 'XS-' + Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, sig, Utilities.Charset.UTF_8)).replace(/[^A-Za-z0-9]/g, '').slice(0, 12) + '-' + seen[sig];
+      out.push(Object.assign(l, {
+        key: key, kind: 'expense', tab: t.name, employeeId: t.emp.id, employee: t.emp.name,
+        expenseType: l.km ? 'Bike Travel (per km)' : /cab|auto|rapido|repido|uber|ola\b/i.test(l.desc) ? 'Auto / Cab' : /coffe|tea|milk|food|snack|biscut|sugar|lunch|chai/i.test(l.desc) ? 'Food' : 'Other',
+      }));
+    });
+  });
+  return out;
+}
+
 function syncDayBook_(user) {
   user = user || { email: 'auto-sync', name: 'Auto sync', role: 'Admin' };
   const settings = readSettings_();
   const cfg = settings.mirror;
-  if (!cfg.readEnabled || !cfg.spreadsheetId) throw err_('Turn on “Read the Day Book into the dashboard” first');
+  if (!cfg.readEnabled) throw err_('Turn on “Read the Day Book into the dashboard” first');
   const lock = LockService.getScriptLock();
   lock.waitLock(60000);
-  const res = { added: 0, changed: 0, removed: 0, ignored: 0, unchanged: 0 };
+  const res = { added: 0, changed: 0, removed: 0, ignored: 0, unchanged: 0, expenses: 0, tabs: [] };
   try {
     // A file import of the same Day Book would double everything: undo it first.
     (settings.imports || []).filter(function (i) { return !i.undone && /^DAYBOOK/.test(i.tag); }).forEach(function (i) { lock.releaseLock(); undoImport_(Object.assign({}, user, { role: 'Admin' }), i.tag, true); lock.waitLock(60000); res.undoneImport = i.tag; });
-    const m = mirrorSheet_(cfg);
-    let hashCol = m.refCol + 1;
-    if (String(m.sh.getRange(1, hashCol).getValue()) !== 'App Sync') m.sh.getRange(1, hashCol).setValue('App Sync').setFontWeight('bold');
+    const m = mirrorSheet_(cfg, true);
+    if (!m.sh) res.noDayBook = true;
+    startRun_();
     const rules = dayBookRules_();
     SALARY_INFO_ = readSalarySheet_(m.ss);
     res.salaryUpdated = applySalarySheet_(user, SALARY_INFO_);
     const links = {};
     readTable_('DayBookLinks').forEach(function (l) { links[l.id] = l; });
     const seen = {};
-    readDayBookLines_(m).forEach(function (l) {
-      if (l.ref && !/^DB-/.test(l.ref)) return; // written by the dashboard itself
-      const h = lineHash_(l);
-      if (l.ref && links[l.ref]) {
-        seen[l.ref] = true;
+    const now = new Date().toISOString();
+    const relink = function (id, c, a, h, old) {
+      const rec = { id: id, hash: h, kind: c.kind, recordTable: a.recordTable, recordId: a.recordId, amount: c.amount, date: c.date, summary: linkSummary_(c), createdBy: old ? old.createdBy : user.email, createdAt: old ? old.createdAt : now, updatedBy: user.email, updatedAt: now };
+      if (old) runDel_('DayBookLinks', id);
+      runAdd_('DayBookLinks', rec);
+    };
+    if (m.sh) {
+      const hashCol = m.refCol + 1;
+      if (String(m.sh.getRange(1, hashCol).getValue()) !== 'App Sync') m.sh.getRange(1, hashCol).setValue('App Sync').setFontWeight('bold');
+      const last = m.sh.getLastRow();
+      const refVals = last > 1 ? m.sh.getRange(2, m.refCol, last - 1, 2).getValues() : [];
+      let refsChanged = false;
+      readDayBookLines_(m).forEach(function (l) {
+        if (l.ref && !/^DB-/.test(l.ref)) return; // written by the dashboard itself
+        const h = lineHash_(l);
         const c = classifyLine_(l, rules);
-        if (links[l.ref].hash === h && links[l.ref].summary === linkSummary_(c)) { res.unchanged++; return; }
-        revertLink_(user, links[l.ref]);
-        const a = applyLine_(user, c, l.ref);
-        patchRow_('DayBookLinks', l.ref, { hash: h, kind: c.kind, recordTable: a.recordTable, recordId: a.recordId, amount: c.amount, date: c.date, summary: linkSummary_(c), updatedBy: user.email, updatedAt: new Date().toISOString() });
-        m.sh.getRange(l.row, hashCol).setValue(h);
-        res.changed++;
-        return;
-      }
-      const ref = newId_('DB');
-      const c = classifyLine_(l, rules);
-      const a = applyLine_(user, c, ref);
-      const now = new Date().toISOString();
-      appendObj_('DayBookLinks', { id: ref, hash: h, kind: c.kind, recordTable: a.recordTable, recordId: a.recordId, amount: c.amount, date: c.date, summary: linkSummary_(c), createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now });
-      m.sh.getRange(l.row, m.refCol).setValue(ref);
-      m.sh.getRange(l.row, hashCol).setValue(h);
-      seen[ref] = true;
-      if (c.kind === 'ignore') res.ignored++; else res.added++;
-    });
+        if (l.ref && links[l.ref] && !seen[l.ref]) {
+          seen[l.ref] = true;
+          if (links[l.ref].hash === h && links[l.ref].summary === linkSummary_(c)) { res.unchanged++; return; }
+          revertLink_(user, links[l.ref]);
+          relink(l.ref, c, applyLine_(user, c, l.ref), h, links[l.ref]);
+          refVals[l.row - 2][1] = h; refsChanged = true;
+          res.changed++;
+          return;
+        }
+        const ref = newId_('DB');
+        relink(ref, c, applyLine_(user, c, ref), h, null);
+        refVals[l.row - 2][0] = ref; refVals[l.row - 2][1] = h; refsChanged = true;
+        seen[ref] = true;
+        if (c.kind === 'ignore') res.ignored++; else res.added++;
+      });
+      if (refsChanged) m.sh.getRange(2, m.refCol, refVals.length, 2).setValues(refVals);
+    }
+    if (cfg.expenseTabs !== false) {
+      const tabs = {};
+      expenseLines_(m.ss, m.sh ? m.sh.getName() : cfg.tab).forEach(function (l) {
+        tabs[l.tab] = (tabs[l.tab] || 0) + 1;
+        seen[l.key] = true;
+        res.expenses++;
+        const summary = linkSummary_(l);
+        if (links[l.key] && links[l.key].summary === summary) { res.unchanged++; return; }
+        if (links[l.key]) revertLink_(user, links[l.key]);
+        relink(l.key, l, applyLine_(user, l, l.key), l.key, links[l.key]);
+        if (links[l.key]) res.changed++; else res.added++;
+      });
+      res.tabs = Object.keys(tabs).map(function (t) { return t + ' (' + tabs[t] + ')'; });
+    }
     Object.keys(links).forEach(function (id) {
       if (seen[id]) return;
+      if (/^DB-/.test(id) && !m.sh) return; // Day Book tab missing: keep everything
+      if (/^XS-/.test(id) && cfg.expenseTabs === false) return;
       revertLink_(user, links[id]);
-      removeIdsRaw_('DayBookLinks', [id]);
+      runDel_('DayBookLinks', id);
       res.removed++;
     });
+    flushRun_(user);
   } finally {
+    RUN_ = null;
     lock.releaseLock();
   }
-  const summary = res.added + ' added, ' + res.changed + ' changed, ' + res.removed + ' removed, ' + res.ignored + ' ignored' + (res.salaryUpdated ? ', ' + res.salaryUpdated + ' salaries updated from the Salary Sheet' : '') + (res.undoneImport ? ' (old file import ' + res.undoneImport + ' replaced)' : '');
+  const summary = (res.noDayBook ? 'No "' + cfg.tab + '" tab found. ' : '') + res.added + ' added, ' + res.changed + ' changed, ' + res.removed + ' removed, ' + res.ignored + ' ignored' + (res.expenses ? ', ' + res.expenses + ' employee expense lines read from ' + res.tabs.length + ' tabs' : '') + (res.salaryUpdated ? ', ' + res.salaryUpdated + ' salaries updated from the Salary Sheet' : '') + (res.undoneImport ? ' (old file import ' + res.undoneImport + ' replaced)' : '');
   const cur = readSettings_().mirror;
   writeSettings_(user, [['mirror', Object.assign(cur, { lastSync: new Date().toISOString(), lastResult: summary })]]);
   if (res.added || res.changed || res.removed) audit_(user, 'sync', 'Day Book', '', summary);
@@ -1640,7 +1875,7 @@ function syncDayBook_(user) {
 /** Time trigger target (every 15 minutes). */
 function autoSyncDayBook() {
   const cfg = readSettings_().mirror;
-  if (cfg.readEnabled && cfg.spreadsheetId) syncDayBook_();
+  if (cfg.readEnabled) syncDayBook_();
 }
 
 /** Run once from the editor to read the Day Book automatically every 15 minutes. */
@@ -1925,7 +2160,7 @@ function attendanceMark_(user, req) {
 }
 
 function attendanceList_(user, from, to) {
-  const all = ['Admin', 'Accountant'].indexOf(user.role) >= 0;
+  const all = user.role === 'Admin';
   return readTable_('Attendance').filter(function (r) {
     return (all || r.email.toLowerCase() === user.email.toLowerCase()) && (!from || r.date >= from) && (!to || r.date <= to);
   });
@@ -2218,6 +2453,7 @@ function ensureColumns_(sh, name) {
   const lastCol = sh.getLastColumn();
   const headers = lastCol ? sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String) : [];
   const missing = fields_(name).map(function (f) { return f[0]; }).filter(function (f) { return headers.indexOf(f) < 0; });
+  if (missing.length && sh.getMaxColumns() < headers.length + missing.length) sh.insertColumnsAfter(sh.getMaxColumns(), headers.length + missing.length - sh.getMaxColumns());
   if (missing.length) sh.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]).setFontWeight('bold').setBackground('#1e293b').setFontColor('#ffffff');
 }
 
@@ -2331,7 +2567,8 @@ function setup() {
     const lastCol = sh.getLastColumn();
     const headers = lastCol ? sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String) : [];
     const missing = fields.filter(function (f) { return headers.indexOf(f[0]) < 0; }).map(function (f) { return f[0]; });
-    if (missing.length) sh.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
+    if (missing.length && sh.getMaxColumns() < headers.length + missing.length) sh.insertColumnsAfter(sh.getMaxColumns(), headers.length + missing.length - sh.getMaxColumns());
+  if (missing.length) sh.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
     const all = headers.concat(missing);
     const rows = Math.max(sh.getMaxRows() - 1, 1);
     fields.forEach(function (f) {

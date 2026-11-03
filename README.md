@@ -10,8 +10,9 @@ Accounts dashboard for Urbane Living. The accountant does all the work from this
 - **Sheet data:** shows every other tab of the Google Sheet. Accountants can add, edit and delete rows, and add columns, without opening the sheet.
 - **Employees from a sheet tab:** in Employees & salary → Employees, choose "Link sheet tab" and pick which column is the name, mobile, salary and so on. Rows in that tab become employees and stay in sync.
 - **Estimates:** the same estimate document as the old estimate page (sections, specs, terms, bank details, PDF). Version 1 is the original and every update is saved as a new version with an edit log. Approved estimates become clients in one click. Admins can import the old Firebase estimates.
-- **Attendance:** marked automatically when someone opens the dashboard from the office network (allowed IP prefixes in Settings → Attendance), with an optional office-location fallback. Team view with a monthly grid for Admins and Accountants.
-- **Roles:** Admin (CEO, COO, VP Sales, IT Manager) sees and handles everything. Accountant handles the accounts. Staff see only their own estimates and attendance.
+- **Attendance:** marked automatically when someone opens the dashboard from the office network (allowed IP prefixes in Settings → Attendance), with an optional office-location fallback. Team view with a monthly grid for Admins only.
+- **Roles:** only Admins see everyone's work (all estimates, team attendance). The Accountant works on the accounts, and everyone else sees only their own estimates, attendance, salary and expenses.
+- **Accountant's sheet (automatic):** the Day Book, Salary Sheet and each employee's expense tab (e.g. "Divya Singh", "Archit Conve Sheet") in the office Google Sheet are read automatically. Day Book lines become client payments, site costs, office expenses, advances and salary. Expense-tab lines (Date · Particulars · Dr amount, or Date · KM · Rate) appear in Employees & salary → Expenses and are added to that month's salary. Entries made in the dashboard are written back to the Day Book.
 - **Dashboard:** cash in vs cash out, client dues, pending salary, recent entries.
 - Fully responsive (phone, tablet, desktop), dark mode, CSV export and print.
 
