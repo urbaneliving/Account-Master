@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-08.2';
+const API_VERSION = '2026-11-09.1';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -357,6 +357,8 @@ function bootstrap_(user) {
     guides: guidesList_(),
     defaultRules: WRITE_ROLES.indexOf(user.role) >= 0 ? defaultDayBookRules_() : [],
     leaves: leaveList_(user),
+    salarySheet: accounts ? salarySheetMonths_() : {},
+    leaveDays: accounts ? approvedLeaves_() : [],
     attendanceToday: attendanceToday_(user),
     users: users.map(function (u) {
       const p = publicUser_(u);
@@ -906,7 +908,33 @@ function mySelf_(user) {
       monthlySalary: e.monthlySalary, perKmRate: e.perKmRate, status: e.status, bankDetails: e.bankDetails,
     },
     expenses: mine('EmployeeExpenses'), advances: mine('SalaryAdvances'), payments: mine('SalaryPayments'),
+    salarySheet: (function () {
+      const all = salarySheetMonths_(); const key = String(e.name).trim().split(/\s+/)[0].toLowerCase(); const out = {};
+      Object.keys(all).forEach(function (mo) { if (all[mo][key]) { const o = {}; o[key] = all[mo][key]; out[mo] = o; } });
+      return out;
+    })(),
+    leaveDays: approvedLeaves_().filter(function (l) { return l.employeeId === e.id; }),
   };
+}
+
+// The accountant's Salary Sheet, month by month: { 'yyyy-MM': { firstname: { salary, absent, advance, pay } } }
+function salarySheetMonths_() {
+  const row = readTable_('Settings').filter(function (r) { return r.key === 'salarySheet'; })[0];
+  try { return row ? JSON.parse(row.value) || {} : {}; } catch (e) { return {}; }
+}
+
+// Approved leaves (not "Work from site"), with the employee they belong to.
+function approvedLeaves_() {
+  const leaves = readTable_('LeaveRequests').filter(function (r) { return r.status === 'Approved' && r.type !== 'Work from site'; });
+  if (!leaves.length) return [];
+  const users = {};
+  readTable_('Users').forEach(function (u) { users[String(u.email).toLowerCase()] = u; });
+  const cache = {};
+  return leaves.map(function (r) {
+    const em = String(r.email).toLowerCase();
+    if (!(em in cache)) { const u = users[em]; const e = u ? linkedEmployee_(u) : null; cache[em] = e ? e.id : ''; }
+    return { employeeId: cache[em], fromDate: r.fromDate, toDate: r.toDate, days: Number(r.days) || 0, type: r.type };
+  }).filter(function (l) { return l.employeeId; });
 }
 
 function setPhoto_(user, photo) {
@@ -1323,6 +1351,7 @@ function mirrorSyncAll_(user) {
 // ---------------------------------------------------------------------------
 const DAYBOOK_TAG = '[daybook]';
 let SALARY_INFO_ = {};
+let SALARY_MONTHS_ = {};
 
 function cleanRule_(r) {
   const actions = ['ignore', 'client', 'site', 'office', 'staff', 'advance', 'salary'];
@@ -1404,6 +1433,13 @@ function costTypeOf_(t, narr) {
   return 'Other';
 }
 
+// Salary paid in November is for the work of October.
+function workMonthOf_(date) {
+  const d = new Date(date.slice(0, 7) + '-01T00:00:00');
+  d.setDate(0);
+  return Utilities.formatDate(d, TZ, 'yyyy-MM');
+}
+
 function salaryMonthOf_(date, cutoff) {
   const d = new Date(date + 'T00:00:00');
   if (d.getDate() <= cutoff) d.setDate(0);
@@ -1436,7 +1472,7 @@ function classifyLine_(line, rules) {
     if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Money in from an employee' });
     let k = rule.action === 'staff' ? null : rule.action;
     if (!k) k = /advance|adv\b|imprest/.test(both) ? 'advance' : /salary|salry|full and final|conveyance|kkbk/.test(both) ? 'salary' : rule.fallback;
-    return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: k === 'advance' ? line.date.slice(0, 7) : salaryMonthOf_(line.date, 20) });
+    return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: k === 'advance' ? line.date.slice(0, 7) : workMonthOf_(line.date) });
   }
   if (rule && rule.action === 'site') return Object.assign(base, { kind: dir === 'in' ? 'ignore' : 'site', client: rule.target || 'Unassigned site work', costType: rule.costType || costTypeOf_(both, narr) });
   if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Receipt with no matching client rule' });
@@ -1574,6 +1610,17 @@ function readSalarySheet_(ss) {
     if (nameCol < 0 || salCol < 0) continue;
     const desCol = head.indexOf('designation');
     const joinCol = head.findIndex ? head.findIndex(function (h) { return /joining/.test(h); }) : -1;
+    const absCol = head.indexOf('absent');
+    const advCol = head.findIndex(function (h) { return /advance/.test(h); });
+    const payCol = head.findIndex(function (h) { return /amount pay|net pay|payable/.test(h); });
+    // "Salary sheet for the month of October 2026" just above the header.
+    let month = '';
+    for (let k = i; k >= Math.max(0, i - 3) && !month; k--) {
+      v[k].forEach(function (x) {
+        const mm = String(x).toLowerCase().match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*[-,']?\s*(\d{4}|\d{2})\b/);
+        if (mm && !month) month = (mm[2].length === 2 ? '20' + mm[2] : mm[2]) + '-' + ('0' + (['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(mm[1]) + 1)).slice(-2);
+      });
+    }
     const block = {};
     for (let j = i + 1; j < v.length; j++) {
       const name = String(v[j][nameCol] || '').trim();
@@ -1583,8 +1630,12 @@ function readSalarySheet_(ss) {
       block[name.split(/\s+/)[0].toLowerCase()] = {
         name: name, salary: sal, designation: desCol >= 0 ? String(v[j][desCol] || '').trim() : '',
         joiningDate: joinCol >= 0 && v[j][joinCol] instanceof Date ? Utilities.formatDate(v[j][joinCol], TZ, 'yyyy-MM-dd') : '',
+        absent: absCol >= 0 ? Number(v[j][absCol]) || 0 : 0,
+        advance: advCol >= 0 ? Number(v[j][advCol]) || 0 : 0,
+        pay: payCol >= 0 && v[j][payCol] !== '' ? Number(v[j][payCol]) || 0 : null,
       };
     }
+    if (month && Object.keys(block).length) SALARY_MONTHS_[month] = block;
     if (Object.keys(block).length) out = block; // keep the last (latest month) block
   }
   return out;
@@ -1779,6 +1830,21 @@ function expenseLines_(ss, dayBookTab) {
 
 function syncDayBook_(user) {
   user = user || { email: 'auto-sync', name: 'Auto sync', role: 'Admin' };
+  try {
+    return syncDayBookRun_(user);
+  } catch (e) {
+    RUN_ = null;
+    const msg = String(e && e.message || e).slice(0, 300);
+    try {
+      const cur = readSettings_().mirror;
+      writeSettings_(user, [['mirror', Object.assign(cur, { lastError: msg, lastErrorAt: new Date().toISOString() })]]);
+      audit_(user, 'sync failed', 'Day Book', '', msg);
+    } catch (e2) { /* ignore */ }
+    throw e;
+  }
+}
+
+function syncDayBookRun_(user) {
   const settings = readSettings_();
   const cfg = settings.mirror;
   if (!cfg.readEnabled) throw err_('Turn on “Read the Day Book into the dashboard” first');
@@ -1786,11 +1852,24 @@ function syncDayBook_(user) {
   lock.waitLock(60000);
   const res = { added: 0, changed: 0, removed: 0, ignored: 0, unchanged: 0, expenses: 0, tabs: [] };
   try {
-    // A file import of the same Day Book would double everything: undo it first.
-    (settings.imports || []).filter(function (i) { return !i.undone && /^DAYBOOK/.test(i.tag); }).forEach(function (i) { lock.releaseLock(); undoImport_(Object.assign({}, user, { role: 'Admin' }), i.tag, true); lock.waitLock(60000); res.undoneImport = i.tag; });
     const m = mirrorSheet_(cfg, true);
     if (!m.sh) res.noDayBook = true;
     startRun_();
+    // A file import of the same Day Book would double everything. Its rows are
+    // removed in the same write as the new ones, so nothing goes missing if the
+    // run stops half way.
+    const oldImports = m.sh ? (settings.imports || []).filter(function (i) { return !i.undone && /^DAYBOOK/.test(i.tag); }) : [];
+    oldImports.forEach(function (i) {
+      const mark = tagOf_(i.tag);
+      IMPORT_TABLES.forEach(function (t) {
+        (t === 'SalaryPayments' ? Object.keys(RUN_.sal).map(function (k) { return RUN_.sal[k]; }) : readTable_(t)).forEach(function (r) {
+          if (String(r.notes || '').indexOf(mark) < 0) return;
+          if (t === 'SalaryPayments') RUN_.salDel[r.id] = true; else runDel_(t, r.id);
+        });
+      });
+      res.undoneImport = i.tag;
+    });
+    SALARY_MONTHS_ = {};
     const rules = dayBookRules_();
     SALARY_INFO_ = readSalarySheet_(m.ss);
     res.salaryUpdated = applySalarySheet_(user, SALARY_INFO_);
@@ -1858,8 +1937,11 @@ function syncDayBook_(user) {
     lock.releaseLock();
   }
   const summary = (res.noDayBook ? 'No "' + cfg.tab + '" tab found. ' : '') + res.added + ' added, ' + res.changed + ' changed, ' + res.removed + ' removed, ' + res.ignored + ' ignored' + (res.expenses ? ', ' + res.expenses + ' employee expense lines read from ' + res.tabs.length + ' tabs' : '') + (res.salaryUpdated ? ', ' + res.salaryUpdated + ' salaries updated from the Salary Sheet' : '') + (res.undoneImport ? ' (old file import ' + res.undoneImport + ' replaced)' : '');
-  const cur = readSettings_().mirror;
-  writeSettings_(user, [['mirror', Object.assign(cur, { lastSync: new Date().toISOString(), lastResult: summary })]]);
+  const after = readSettings_();
+  const entries = [['mirror', Object.assign(after.mirror, { lastSync: new Date().toISOString(), lastResult: summary, lastError: '' })]];
+  if (Object.keys(SALARY_MONTHS_).length) entries.push(['salarySheet', SALARY_MONTHS_]);
+  if (res.undoneImport) entries.push(['imports', after.imports.map(function (i) { if (!i.undone && /^DAYBOOK/.test(i.tag)) { i.undone = new Date().toISOString(); i.undoneBy = user.email; } return i; })]);
+  writeSettings_(user, entries);
   if (res.added || res.changed || res.removed) audit_(user, 'sync', 'Day Book', '', summary);
   return Object.assign(res, { summary: summary });
 }
@@ -1868,6 +1950,11 @@ function syncDayBook_(user) {
 function autoSyncDayBook() {
   const cfg = readSettings_().mirror;
   if (cfg.readEnabled) syncDayBook_();
+}
+
+/** Run from the editor to sync now and see the result (or the error) in the Execution log. */
+function runSyncNow() {
+  try { Logger.log('OK: ' + syncDayBook_().summary); } catch (e) { Logger.log('SYNC FAILED: ' + (e && e.stack || e)); }
 }
 
 /** Run once from the editor to read the Day Book automatically every 15 minutes. */

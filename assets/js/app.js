@@ -47,6 +47,7 @@
   const isoDate = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   const today = () => isoDate(new Date());
   const thisMonth = () => today().slice(0, 7);
+  const lastMonth = () => { const d = new Date(thisMonth() + '-01T00:00:00'); d.setDate(0); return isoDate(d).slice(0, 7); };
   const monthOf = (d) => String(d || '').slice(0, 7);
   const addMonths = (m, n) => {
     const d = new Date(m + '-01T00:00:00');
@@ -334,18 +335,46 @@
     };
   }
 
-  function salaryFor(emp, month) {
-    const exp = rows('EmployeeExpenses').filter((x) => x.employeeId === emp.id && x.salaryMonth === month);
-    const adv = rows('SalaryAdvances').filter((x) => x.employeeId === emp.id && x.salaryMonth === month);
-    const pay = rows('SalaryPayments').find((x) => x.employeeId === emp.id && x.salaryMonth === month);
-    const base = pay ? num(pay.baseSalary) : num(emp.monthlySalary);
+  // Leave days of one month (approved leaves; a range is split across months).
+  function leaveDaysIn(leaves, month) {
+    let n = 0;
+    (leaves || []).forEach((l) => {
+      if (l.type === 'Half day') { if ((l.fromDate || '').slice(0, 7) === month) n += 0.5; return; }
+      const d = new Date(l.fromDate + 'T00:00:00'); const end = new Date((l.toDate || l.fromDate) + 'T00:00:00');
+      for (let i = 0; d <= end && i < 62; i++) { if (isoDate(d).slice(0, 7) === month) n++; d.setDate(d.getDate() + 1); }
+    });
+    return n;
+  }
+  // Salary of one work month. Work done in October is paid in November, and
+  // October's expenses, advances and leaves all count in October's salary.
+  // If the accountant's Salary Sheet has that month, its salary and absent /
+  // part-month cut are used, so the numbers match the sheet.
+  function calcSalary(emp, month, src) {
+    const exp = src.exp.filter((x) => x.salaryMonth === month);
+    const adv = src.adv.filter((x) => x.salaryMonth === month);
+    const pay = src.pays.find((x) => x.salaryMonth === month);
+    const key = String(emp.name || '').trim().split(/\s+/)[0].toLowerCase();
+    const sheet = ((src.sheet || {})[month] || {})[key] || null;
+    const base = sheet ? num(sheet.salary) : pay && num(pay.baseSalary) ? num(pay.baseSalary) : num(emp.monthlySalary);
+    const leaveDays = leaveDaysIn(src.leaves, month);
+    const sheetAbsent = sheet ? num(sheet.absent) : 0;
+    const absentDays = Math.max(sheetAbsent, leaveDays);
+    // Salary Sheet cut (absent / part month) + approved leaves the sheet doesn't have yet, at salary ÷ 30 per day.
+    let leaveCut = Math.round(base / 30 * Math.max(0, leaveDays - sheetAbsent));
+    if (sheet && sheet.pay !== null && sheet.pay !== undefined) leaveCut += Math.max(0, round2(num(sheet.salary) - num(sheet.advance) - num(sheet.pay)));
+    else leaveCut = Math.round(base / 30 * absentDays);
+    const manual = pay ? num(pay.deduction) : 0;
+    const deduction = manual || leaveCut;
     const expenses = sum(exp, 'amount');
     const advances = sum(adv, 'amount');
-    const deduction = pay ? num(pay.deduction) : 0;
     const bonus = pay ? num(pay.bonus) : 0;
     const net = round2(base + expenses - advances - deduction + bonus);
     const paid = pay ? num(pay.paidAmount) : 0;
-    return { emp, month, exp, adv, pay, base, expenses, advances, deduction, bonus, net, paid, balance: round2(net - paid) };
+    return { emp, month, exp, adv, pay, base, expenses, advances, deduction, leaveDays, absentDays, leaveCut: manual ? 0 : leaveCut, fromSheet: !!sheet, bonus, net, paid, balance: round2(net - paid) };
+  }
+  function salaryFor(emp, month) {
+    const mine = (t) => rows(t).filter((x) => x.employeeId === emp.id);
+    return calcSalary(emp, month, { exp: mine('EmployeeExpenses'), adv: mine('SalaryAdvances'), pays: mine('SalaryPayments'), sheet: S.salarySheet, leaves: (S.leaveDays || []).filter((l) => l.employeeId === emp.id) });
   }
 
   function salaryEmployees(month) {
@@ -353,7 +382,7 @@
     return rows('Employees').filter((e) => {
       const hasRecords = ['EmployeeExpenses', 'SalaryAdvances', 'SalaryPayments'].some((t) => rows(t).some((x) => x.employeeId === e.id && x.salaryMonth === month));
       if (hasRecords) return true;
-      if (e.status !== 'Active') return false;
+      if (e.status !== 'Active' || !num(e.monthlySalary)) return false;
       return !e.joiningDate || e.joiningDate <= end;
     });
   }
@@ -428,6 +457,8 @@
     S.guides = r.guides || [];
     S.defaultRules = r.defaultRules || [];
     S.leaves = r.leaves || [];
+    S.salarySheet = r.salarySheet || {};
+    S.leaveDays = r.leaveDays || [];
   }
 
   async function saveRecord(table, record) {
@@ -693,8 +724,8 @@
   function openSalaryPay(empId, month) {
     const emp = byId('Employees', empId);
     const s = salaryFor(emp, month);
-    const presets = { salaryMonth: month, employeeId: empId, baseSalary: s.base, expenses: s.expenses, advances: s.advances };
-    if (s.pay) openForm('SalaryPayments', Object.assign({}, s.pay, { expenses: s.expenses, advances: s.advances }));
+    const presets = { salaryMonth: month, employeeId: empId, baseSalary: s.base, expenses: s.expenses, advances: s.advances, deduction: s.deduction };
+    if (s.pay) openForm('SalaryPayments', Object.assign({}, s.pay, { baseSalary: s.base, expenses: s.expenses, advances: s.advances, deduction: s.deduction }));
     else openForm('SalaryPayments', null, presets);
   }
 
@@ -800,7 +831,6 @@
     ['clients', 'Clients', 'clients', true],
     ['office', 'Office expenses', 'office', true],
     ['salary', 'Employees & salary', 'salary', true],
-    ['expenses', 'Employee expenses', 'expenses', true],
     ['attendance', 'Attendance', 'attendance', false],
     ['sheet', 'Sheet data', 'sheet', true],
     ['settings', 'Settings', 'settings', false],
@@ -839,8 +869,8 @@
     let r = route();
     if (ACCOUNT_PAGES.includes(r.page) && !seesAccounts()) { location.replace('#/' + homePage()); r = route(); }
     document.body.classList.remove('print-estimate');
-    $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.nav === r.page || (r.page === 'employees' && a.dataset.nav === 'salary')));
-    const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: viewExpenses, sheet: viewSheet, settings: viewSettings, estimates: viewEstimates, attendance: viewAttendance, me: viewMe };
+    $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.nav === r.page || ((r.page === 'employees' || r.page === 'expenses') && a.dataset.nav === 'salary')));
+    const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: () => { ui('salary').tab = 'expenses'; return viewSalary(); }, sheet: viewSheet, settings: viewSettings, estimates: viewEstimates, attendance: viewAttendance, me: viewMe };
     const fn = views[r.page] || views[homePage()];
     try {
       page.innerHTML = fn(r.id);
@@ -1184,9 +1214,9 @@
   // ---------------------------------------------------------------------------
   function viewSalary() {
     const st = ui('salary');
-    if (!st.month) st.month = thisMonth();
+    if (!st.month) st.month = lastMonth(); // salary being paid now is for last month's work
     const emps = rows('Employees');
-    let h = pageHead('Employees & salary', 'Salary = base + expenses − advances − deductions + bonus',
+    let h = pageHead('Employees & salary', 'Month-wise: work of October is paid in November — October’s expenses, advances and leaves count in October’s salary',
       addBtn('Employees', 'Add employee') + (canWrite() ? '<button class="btn" data-act="add" data-t="SalaryAdvances">' + icon('plus') + 'Give advance</button>' : ''));
     h += tabs('salary', [['sheet', 'Salary sheet'], ['employees', 'Employees', emps.length], ['expenses', 'Expenses', rows('EmployeeExpenses').filter((x) => x.salaryMonth === st.month).length], ['advances', 'Advances', rows('SalaryAdvances').length], ['history', 'Payment history', rows('SalaryPayments').length]], 'sheet');
 
@@ -1203,7 +1233,8 @@
         { k: 'base', l: 'Base', r: true, total: true, v: (s) => s.base, f: (s) => inr(s.base) },
         { k: 'expenses', l: '+ Expenses', r: true, total: true, v: (s) => s.expenses, f: (s) => s.expenses ? '<span class="pos">' + inr(s.expenses) + '</span>' : '' },
         { k: 'advances', l: '− Advances', r: true, total: true, v: (s) => s.advances, f: (s) => s.advances ? '<span class="neg">' + inr(s.advances) + '</span>' : '' },
-        { k: 'adj', l: '± Other', r: true, v: (s) => s.bonus - s.deduction, f: (s) => s.bonus - s.deduction ? inr(s.bonus - s.deduction) : '' },
+        { k: 'leave', l: 'Leave days', r: true, total: true, v: (s) => s.absentDays, f: (s) => s.absentDays ? esc(s.absentDays) : '' },
+        { k: 'adj', l: '± Leave / other', r: true, v: (s) => s.bonus - s.deduction, f: (s) => s.bonus - s.deduction ? inr(s.bonus - s.deduction) : '' },
         { k: 'net', l: 'Net payable', r: true, total: true, v: (s) => s.net, f: (s) => '<b>' + inr(s.net) + '</b>' },
         { k: 'paid', l: 'Paid', r: true, total: true, v: (s) => s.paid, f: (s) => s.pay ? inr(s.paid) + '<div class="cell-sub">' + esc(fmtDate(s.pay.paidDate)) + '</div>' : '' },
         { k: 'status', l: 'Status', v: (s) => (!s.pay ? 'Pending' : s.balance > 0 ? 'Partial' : 'Paid'), f: (s) => statusBadge(!s.pay ? 'Pending' : s.balance > 0.009 ? 'Partial' : 'Paid') + (s.pay && Math.abs(s.balance) > 0.009 ? '<div class="cell-sub">Bal ' + inr(s.balance) + '</div>' : '') },
@@ -1323,7 +1354,7 @@
       '<span>Base salary</span><span class="num">' + inr(s.base) + '</span>' +
       '<span>+ Expenses (' + s.exp.length + ')</span><span class="num pos">' + inr(s.expenses) + '</span>' +
       '<span>− Advances (' + s.adv.length + ')</span><span class="num neg">' + inr(s.advances) + '</span>' +
-      (s.deduction ? '<span>− Other deduction</span><span class="num neg">' + inr(s.deduction) + '</span>' : '') +
+      (s.deduction ? '<span>− ' + (s.leaveCut ? (s.absentDays ? 'Leave / absent (' + s.absentDays + ' day' + (s.absentDays === 1 ? '' : 's') + ')' : 'Part month (as per Salary Sheet)') : 'Other deduction') + '</span><span class="num neg">' + inr(s.deduction) + '</span>' : '') +
       (s.bonus ? '<span>+ Bonus / incentive</span><span class="num pos">' + inr(s.bonus) + '</span>' : '') +
       '<span class="total">Net payable</span><span class="total num">' + inr(s.net) + '</span>' +
       '<span>Paid' + (s.pay ? ' on ' + esc(fmtDate(s.pay.paidDate)) : '') + '</span><span class="num">' + inr(s.paid) + '</span>' +
@@ -2238,24 +2269,13 @@
   // ---------------------------------------------------------------------------
   function mySalary(month) {
     const me = S.me;
-    const e = me.employee;
-    const exp = me.expenses.filter((x) => x.salaryMonth === month);
-    const adv = me.advances.filter((x) => x.salaryMonth === month);
-    const pay = me.payments.find((x) => x.salaryMonth === month);
-    const base = pay ? num(pay.baseSalary) : num(e.monthlySalary);
-    const expenses = sum(exp, 'amount');
-    const advances = sum(adv, 'amount');
-    const deduction = pay ? num(pay.deduction) : 0;
-    const bonus = pay ? num(pay.bonus) : 0;
-    const net = round2(base + expenses - advances - deduction + bonus);
-    const paid = pay ? num(pay.paidAmount) : 0;
-    return { month, exp, adv, pay, base, expenses, advances, deduction, bonus, net, paid, balance: round2(net - paid) };
+    return calcSalary(me.employee, month, { exp: me.expenses || [], adv: me.advances || [], pays: me.payments || [], sheet: me.salarySheet, leaves: me.leaveDays || [] });
   }
 
   function viewMe() {
     const u = S.user;
     const st = ui('me');
-    if (!st.month) st.month = thisMonth();
+    if (!st.month) st.month = lastMonth();
     let h = '<div class="card" style="margin-bottom:16px"><div class="card-body" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">' +
       '<label title="Change photo" style="cursor:pointer;position:relative">' + avatar(u, 72) +
       '<input type="file" accept="image/*" id="photo-input" style="display:none"><span class="badge" style="position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);background:var(--surface)">Edit</span></label>' +
@@ -2280,7 +2300,7 @@
       '<span>Base salary</span><span class="num">' + inr(s.base) + '</span>' +
       '<span>+ Expenses</span><span class="num pos">' + inr(s.expenses) + '</span>' +
       '<span>− Advances</span><span class="num neg">' + inr(s.advances) + '</span>' +
-      (s.deduction ? '<span>− Other deduction</span><span class="num neg">' + inr(s.deduction) + '</span>' : '') +
+      (s.deduction ? '<span>− ' + (s.leaveCut ? (s.absentDays ? 'Leave / absent (' + s.absentDays + ' day' + (s.absentDays === 1 ? '' : 's') + ')' : 'Part month (as per Salary Sheet)') : 'Other deduction') + '</span><span class="num neg">' + inr(s.deduction) + '</span>' : '') +
       (s.bonus ? '<span>+ Bonus / other</span><span class="num pos">' + inr(s.bonus) + '</span>' : '') +
       '<span class="total">Net payable</span><span class="total num">' + inr(s.net) + '</span>' +
       '<span>Paid' + (s.pay ? ' on ' + esc(fmtDate(s.pay.paidDate)) + (s.pay.mode ? ' · ' + esc(s.pay.mode) : '') : '') + '</span><span class="num">' + inr(s.paid) + '</span>' +
@@ -2840,6 +2860,7 @@
       '<div class="sp"><button class="btn primary" type="submit">Save &amp; connect</button>' +
       (m.readEnabled ? '<button class="btn" type="button" data-act="daybook-sync">' + icon('refresh') + 'Sync now</button><button class="btn" type="button" data-act="daybook-preview">Preview</button>' : '') +
       (m.enabled ? '<button class="btn" type="button" data-act="mirror-sync">Copy dashboard entries to sheet</button>' : '') + '</div></form>' +
+      (m.lastError ? '<div class="notice" style="margin:12px 0 0;border-color:var(--bad,#c00000)"><b>Last sync failed:</b> ' + esc(m.lastError) + '<div class="small">Press “Sync now” again. If it fails again, open Apps Script, run <b>runSyncNow</b> and send the Execution log.</div></div>' : '') +
       (m.lastSync ? '<p class="small muted" style="margin-bottom:0">Last sync: <b>' + esc(fmtStamp(m.lastSync)) + '</b> — ' + esc(m.lastResult || '') + '</p>' : '') +
       '</div></div><div class="card"><div class="card-head"><h2>Good to know</h2></div><div class="card-body small" style="line-height:1.7">' +
       '<p style="margin-top:0">• Columns <b>App Ref</b> and <b>App Sync</b> are added to the Day Book. Please don’t edit or delete them — they link each line to the dashboard.</p>' +
@@ -2883,7 +2904,11 @@
       if (r.result.added || r.result.changed || r.result.removed || r.result.salaryUpdated || r.result.undoneImport) await loadAll();
       if (loud) toast('Day Book synced: ' + r.result.summary);
       return r.result;
-    } catch (e) { if (loud) toast(e.message, true); return null; }
+    } catch (e) {
+      S.settings.mirror.lastError = e.message;
+      toast((loud ? '' : 'Day Book sync failed: ') + e.message + (loud ? '' : ' — see Settings → Accountant sheet & sync'), true);
+      return null;
+    }
   }
   // Keep the dashboard current: read the Day Book when the app opens if the last sync is old.
   async function autoDayBookSync() {
