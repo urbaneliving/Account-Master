@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-09.1';
+const API_VERSION = '2026-11-09.2';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -654,7 +654,7 @@ function readSettings_() {
       if (r.key === 'company') s.company = Object.assign(s.company, v);
       else if (r.key === 'employeeSource') s.employeeSource = v;
       else if (r.key === 'attendance') s.attendance = Object.assign(s.attendance, v);
-      else if (r.key === 'mirror') s.mirror = Object.assign(s.mirror, v);
+      else if (r.key === 'mirror') s.mirror = Object.assign(s.mirror, v, { readEnabled: true });
       else if (r.key === 'dayBookRules' && Array.isArray(v)) { s.dayBookRules = v; s.dayBookRulesCustom = true; }
       else if (r.key === 'estimateCounter') s.estimateCounter = Number(v) || s.estimateCounter;
       else if (r.key === 'estimateTemplate') s.estimateTemplate = v;
@@ -1268,12 +1268,35 @@ function authorizeDrive() {
 const MIRROR_TABLES = ['ClientPayments', 'ClientWork', 'OfficeExpenses', 'SalaryAdvances', 'SalaryPayments'];
 const MIRROR_HEAD = ['Date', 'DR', 'CR', 'Narration', 'Remarks', 'App Ref'];
 
+// Which spreadsheet holds the Day Book: the linked one if it has the tab, else
+// the office spreadsheet if it has it (so a wrong or old link never blocks the sync).
+function dayBookBook_(cfg, forRead) {
+  const tab = cfg.tab || 'Day Book';
+  let linked = null;
+  if (cfg.spreadsheetId) { try { linked = SpreadsheetApp.openById(cfg.spreadsheetId); } catch (e) { linked = null; } }
+  if (linked && !forRead) return linked; // writes go to the linked file (the tab is created there)
+  const lt = linked && linked.getSheetByName(tab);
+  if (lt && lt.getLastRow() > 1 && !onlyAppRows_(lt)) return linked;
+  const office = ss_();
+  if (office.getSheetByName(tab)) return office;
+  if (lt) return linked;
+  if (cfg.spreadsheetId && !linked) throw err_('Cannot open the accountant\'s spreadsheet. Share it (Editor) with the Google account that owns this Apps Script, and check the link.');
+  return linked || office;
+}
+
+// True when a Day Book tab holds only lines the dashboard wrote itself (no accountant lines).
+function onlyAppRows_(sh) {
+  const last = sh.getLastRow();
+  const w = Math.max(sh.getLastColumn(), 6);
+  const v = sh.getRange(1, 1, last, w).getValues();
+  const refCol = v[0].map(String).indexOf('App Ref');
+  if (refCol < 0) return false;
+  return v.slice(1).every(function (r) { return !(r[1] || r[2]) || (r[refCol] && !/^DB-/.test(String(r[refCol]))); });
+}
+
 // Empty spreadsheetId = the Day Book is a tab of this same (office) spreadsheet.
 function mirrorSheet_(cfg, noCreate) {
-  let ss;
-  try { ss = cfg.spreadsheetId ? SpreadsheetApp.openById(cfg.spreadsheetId) : ss_(); } catch (e) {
-    throw err_('Cannot open the accountant\'s spreadsheet. Share it (Editor) with the Google account that owns this Apps Script, and check the link.');
-  }
+  const ss = dayBookBook_(cfg, noCreate);
   let sh = ss.getSheetByName(cfg.tab || 'Day Book');
   if (!sh) {
     if (noCreate) return { sh: null, ss: ss, name: ss.getName() };
@@ -1663,6 +1686,12 @@ function ensureNamed_(user, table, name, extra) {
     if (RUN_) RUN_.named[table] = map;
   }
   if (map[key]) return map[key];
+  if (table === 'Employees') {
+    // "Ayush" (Salary Sheet) = "Ayush Kumar" (Day Book): same first name, only one such employee.
+    const first = key.split(/\s+/)[0];
+    const hits = Object.keys(map).filter(function (k) { return k.split(/\s+/)[0] === first; });
+    if (first.length >= 3 && hits.length === 1) { map[key] = map[hits[0]]; return map[key]; }
+  }
   const now = new Date().toISOString();
   const o = Object.assign({ id: newId_(table === 'Clients' ? 'CL' : 'EM'), name: name, status: table === 'Clients' ? 'Ongoing' : 'Active', notes: 'Created from the Day Book ' + DAYBOOK_TAG, createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now }, extra || {});
   if (table === 'Clients') { const v = sheet_('Clients').getDataRange().getValues(); o.clientCode = nextCode_(v, v[0].map(String), 'clientCode', 'UL-C-'); }
@@ -1872,7 +1901,6 @@ function syncDayBookRun_(user) {
     SALARY_MONTHS_ = {};
     const rules = dayBookRules_();
     SALARY_INFO_ = readSalarySheet_(m.ss);
-    res.salaryUpdated = applySalarySheet_(user, SALARY_INFO_);
     const links = {};
     readTable_('DayBookLinks').forEach(function (l) { links[l.id] = l; });
     const seen = {};
@@ -1909,6 +1937,10 @@ function syncDayBookRun_(user) {
       });
       if (refsChanged) m.sh.getRange(2, m.refCol, refVals.length, 2).setValues(refVals);
     }
+    // Everyone in the Salary Sheet becomes an employee (so My account works for all).
+    Object.keys(SALARY_INFO_).forEach(function (k) { ensureNamed_(user, 'Employees', SALARY_INFO_[k].name); });
+    RUN_.emps = null;
+    res.salaryUpdated = applySalarySheet_(user, SALARY_INFO_);
     if (cfg.expenseTabs !== false) {
       const tabs = {};
       expenseLines_(m.ss, m.sh ? m.sh.getName() : cfg.tab).forEach(function (l) {
