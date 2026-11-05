@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-09.2';
+const API_VERSION = '2026-11-09.3';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -349,6 +349,7 @@ function bootstrap_(user) {
   const settings = readSettings_();
   if (!accounts) settings.lists = {};
   return {
+    apiVersion: API_VERSION,
     user: publicUser_(user),
     settings: settings,
     data: data,

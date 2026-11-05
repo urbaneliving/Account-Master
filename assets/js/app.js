@@ -457,6 +457,7 @@
     S.guides = r.guides || [];
     S.defaultRules = r.defaultRules || [];
     S.leaves = r.leaves || [];
+    S.apiVersion = r.apiVersion || '';
     S.salarySheet = r.salarySheet || {};
     S.leaveDays = r.leaveDays || [];
   }
@@ -859,6 +860,24 @@
       '<main class="content" id="page"></main></div></div>';
   }
 
+  // The dashboard needs the Apps Script code from this same release.
+  const NEEDED_API = '2026-11-09.3';
+  function backendNotice() {
+    if (DEMO || !S.user || !canWrite()) return '';
+    const v = S.apiVersion || 'old';
+    let h = '';
+    if (!S.apiVersion || S.apiVersion < NEEDED_API) {
+      h += '<div class="notice" style="margin:0 0 16px;border-color:#c00000"><b>Apps Script code is old (' + esc(v) + ').</b> Data from the Day Book will not load until it is updated: ' +
+        'Google Sheet → Extensions → Apps Script → paste the new Code.gs → Save → Deploy → Manage deployments → ✏️ → Version: <b>New version</b> → Deploy. Then press Ctrl+Shift+R here.</div>';
+    } else if (!rows('Clients').length || (S.settings.mirror || {}).lastError) {
+      const m = S.settings.mirror || {};
+      h += '<div class="notice" style="margin:0 0 16px;display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap"><div><b>' + (m.lastError ? 'Last Day Book sync failed: ' + esc(m.lastError) : 'No data from the Day Book yet.') + '</b>' +
+        '<div class="small">' + (m.lastSync ? 'Last sync ' + esc(fmtStamp(m.lastSync)) + ' — ' + esc(m.lastResult || '') : 'It has not been read yet.') + '</div></div>' +
+        '<button class="btn primary" data-act="daybook-sync">' + icon('refresh') + 'Read the Day Book now</button></div>';
+    }
+    return h;
+  }
+
   function renderPage() {
     const page = $('#page');
     if (!page) return;
@@ -873,7 +892,7 @@
     const views = { dashboard: viewDashboard, clients: r.id ? viewClient : viewClients, office: viewOffice, salary: viewSalary, employees: viewEmployee, expenses: () => { ui('salary').tab = 'expenses'; return viewSalary(); }, sheet: viewSheet, settings: viewSettings, estimates: viewEstimates, attendance: viewAttendance, me: viewMe };
     const fn = views[r.page] || views[homePage()];
     try {
-      page.innerHTML = fn(r.id);
+      page.innerHTML = backendNotice() + fn(r.id);
     } catch (e) {
       console.error(e);
       page.innerHTML = '<div class="empty">Something went wrong: ' + esc(e.message) + '</div>';
