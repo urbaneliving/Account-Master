@@ -861,7 +861,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-09.3';
+  const NEEDED_API = '2026-11-24.1';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -3170,27 +3170,32 @@
       '<label class="field full">Linked employee<select class="input" name="employeeId"><option value="">Automatic (same email or name)</option>' +
         rows('Employees').slice().sort((a, b) => a.name.localeCompare(b.name)).map((e) => '<option value="' + esc(e.id) + '"' + (e.id === u.employeeId ? ' selected' : '') + '>' + esc(e.name + (e.designation ? ' · ' + e.designation : '')) + '</option>').join('') +
         '</select><span class="field-hint">Their salary, advances and expenses show on their own “My account” page</span></label>' +
-      (isNew ? '<label class="field full">One-time password<input class="input" name="password" type="text" autocomplete="off" value="' + esc(tempPassword()) + '"><span class="field-hint">Share this with the member. They must set their own password at first login.</span></label>' : '') +
+      (isNew ? '<label class="field full">One-time password<input class="input" name="password" type="text" autocomplete="off" value="' + esc(tempPassword()) + '"><span class="field-hint">They must set their own password at first login.</span></label>' + '<label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" name="sendEmail" checked> Email the login ID and this password to the member</label>' : '') +
       '</div>';
     openModal(isNew ? 'Add member' : 'Edit member', body, {
       submit: isNew ? 'Add member' : 'Save changes',
       onSubmit: async (form) => {
         const rec = { id: u.id, name: form.name.value, designation: form.designation.value, email: form.email.value, phone: form.phone.value, role: form.role.value, status: form.status.value, employeeId: form.employeeId.value };
-        await api('saveUser', { record: rec, password: isNew ? form.password.value : '' });
+        const r = await api('saveUser', { record: rec, password: isNew ? form.password.value : '', sendEmail: isNew && form.sendEmail.checked });
         await loadAll();
-        toast(isNew ? 'Member added' : 'Member updated');
+        if (!isNew) toast('Member updated');
+        else if (r.emailed) toast('Member added — login details emailed to ' + rec.email);
+        else if (form.sendEmail.checked) toast('Member added, but the email failed: ' + (r.emailError || 'unknown error') + '. Share the password yourself.', true);
+        else toast('Member added');
         renderPage();
       },
     });
   }
 
   function openReset(u) {
-    openModal('Reset password · ' + u.name, '<label class="field">New one-time password<input class="input" name="password" type="text" autocomplete="off" value="' + esc(tempPassword()) + '"><span class="field-hint">The member will be logged out and must set their own password at next login.</span></label>', {
+    openModal('Reset password · ' + u.name, '<label class="field">New one-time password<input class="input" name="password" type="text" autocomplete="off" value="' + esc(tempPassword()) + '"><span class="field-hint">The member will be logged out and must set their own password at next login.</span></label>' + '<label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" name="sendEmail" checked> Email the login ID and this password to ' + esc(u.email) + '</label>', {
       submit: 'Reset password',
       onSubmit: async (form) => {
-        await api('resetPassword', { id: u.id, password: form.password.value });
+        const r = await api('resetPassword', { id: u.id, password: form.password.value, sendEmail: form.sendEmail.checked });
         await loadAll();
-        toast('Password reset — share the new password with ' + u.name);
+        if (r.emailed) toast('Password reset — emailed to ' + u.email);
+        else if (form.sendEmail.checked) toast('Password reset, but the email failed: ' + (r.emailError || 'unknown error') + '. Share the password with ' + u.name + ' yourself.', true);
+        else toast('Password reset — share the new password with ' + u.name);
         renderPage();
       },
     });

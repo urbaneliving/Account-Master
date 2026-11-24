@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-09.3';
+const API_VERSION = '2026-11-24.1';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -183,8 +183,8 @@ function route_(req) {
     case 'changePassword': return changePassword_(user, req.oldPassword, req.newPassword);
     case 'save': return saveRecord_(user, req.table, req.record);
     case 'remove': return removeRecord_(user, req.table, req.id);
-    case 'saveUser': return saveUser_(user, req.record, req.password);
-    case 'resetPassword': return resetPassword_(user, req.id, req.password);
+    case 'saveUser': return saveUser_(user, req.record, req.password, req.sendEmail);
+    case 'resetPassword': return resetPassword_(user, req.id, req.password, req.sendEmail);
     case 'saveSettings': return saveSettings_(user, req.settings);
     case 'audit': return { rows: auditRows_(user, req.limit) };
     case 'sheetTabs': needRole_(user, ACCOUNTS_ROLES); return sheetTabs_(req.name, user.role === 'Admin');
@@ -574,7 +574,7 @@ function mergeRecords_(user, table, keepId, removeIds) {
 // ---------------------------------------------------------------------------
 // Users (Admin only)
 // ---------------------------------------------------------------------------
-function saveUser_(user, rec, password) {
+function saveUser_(user, rec, password, sendEmail) {
   needRole_(user, ['Admin']);
   rec = rec || {};
   const email = String(rec.email || '').trim().toLowerCase();
@@ -611,7 +611,36 @@ function saveUser_(user, rec, password) {
   appendObj_('Users', patch);
   syncDesignation_(user, patch.employeeId, '', patch.designation);
   audit_(user, 'create', 'Users', patch.id, patch.email + ' ' + patch.role);
-  return {};
+  return sendEmail ? loginMail_(user, patch, password, true) : {};
+}
+
+const DASHBOARD_URL = 'https://urbaneliving.github.io/Account-Master/';
+
+// Email a member their login ID and one-time password. Always sent when the
+// Admin ticks the box (not tied to the Notifications switches). Never throws.
+function loginMail_(user, member, password, isNew) {
+  try {
+    if (MailApp.getRemainingDailyQuota() < 1) return { emailed: false, emailError: 'Daily email limit reached — share the password yourself' };
+    const company = readSettings_().company.name || 'Urbane Living';
+    MailApp.sendEmail({
+      to: member.email, name: company, replyTo: user.email,
+      subject: company + ' · ' + (isNew ? 'Your dashboard login' : 'Your password was reset'),
+      htmlBody: '<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:560px">' +
+        '<p>Hello ' + esc_(member.name) + ',</p>' +
+        '<p>' + (isNew ? 'A login has been created for you on the ' + esc_(company) + ' dashboard.' : esc_(user.name || user.email) + ' has reset your password for the ' + esc_(company) + ' dashboard.') + '</p>' +
+        '<table style="border-collapse:collapse;margin:12px 0"><tr><td style="padding:4px 12px 4px 0;color:#666">Login ID</td><td><b>' + esc_(member.email) + '</b></td></tr>' +
+        '<tr><td style="padding:4px 12px 4px 0;color:#666">One-time password</td><td><b style="font-family:monospace;font-size:16px">' + esc_(password) + '</b></td></tr></table>' +
+        '<p><a href="' + DASHBOARD_URL + '" style="background:#c00000;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block">Open the dashboard</a></p>' +
+        '<p>After you log in you will be asked to set your own password. This one-time password then stops working.</p>' +
+        '<p style="color:#888;font-size:12px;margin-top:24px">If you did not expect this email, tell ' + esc_(user.email) + '.</p></div>',
+    });
+    audit_(user, 'email', 'Users', member.id || '', 'Login details sent to ' + member.email);
+    return { emailed: true };
+  } catch (e) {
+    const msg = String(e && e.message || e).slice(0, 200);
+    audit_(user, 'email failed', 'Users', member.id || '', msg);
+    return { emailed: false, emailError: /permission|authoriz/i.test(msg) ? 'Email is not allowed yet — in Apps Script run authorizeEmail once and allow it' : msg };
+  }
 }
 
 // A member's designation and their linked employee's designation are kept the
@@ -631,8 +660,10 @@ function syncDesignation_(user, employeeId, fromEmployeeId, designation) {
   if (list.indexOf(designation) < 0) writeSettings_(user, [['list.designations', list.concat([designation])]]);
 }
 
-function resetPassword_(user, id, password) {
+function resetPassword_(user, id, password, sendEmail) {
   needRole_(user, ['Admin']);
+  const member = readTable_('Users').filter(function (u) { return u.id === id; })[0];
+  if (!member) throw err_('Member not found');
   const patch = {};
   setPassword_(patch, password);
   patch.mustChange = 'TRUE';
@@ -641,7 +672,7 @@ function resetPassword_(user, id, password) {
   patchRow_('Users', id, patch);
   endUserSessions_(id);
   audit_(user, 'password', 'Users', id, 'Password reset by admin');
-  return {};
+  return sendEmail ? loginMail_(user, member, password, false) : {};
 }
 
 // ---------------------------------------------------------------------------
