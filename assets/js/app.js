@@ -401,9 +401,33 @@
     if (f.get('date')) f.set('salaryMonth', cycleOf(f.get('date')));
   }
 
+  // When last month's salary was paid only in part (e.g. "Advance Salary Paid" =
+  // salary only), its unpaid expenses move into this month's salary. Last month
+  // then shows them as moved, so nothing is counted twice.
+  function withCarry(emp, month, src, depth) {
+    const s = calcSalary(emp, month, src);
+    s.carryIn = 0;
+    if (depth > 0) {
+      const prev = withCarry(emp, addMonths(month, -1), src, depth - 1);
+      const owed = round2(prev.balance - (prev.carryOut || 0));
+      if (prev.paid > 0 && owed > 0.5) {
+        const c = round2(Math.min(prev.expenses + prev.carryIn, owed));
+        if (c > 0.5) { s.carryIn = c; s.carryFrom = prev.month; s.net = round2(s.net + c); s.balance = round2(s.balance + c); }
+      }
+    }
+    return s;
+  }
+  function salaryWithCarry(emp, month, src) {
+    const s = withCarry(emp, month, src, 3);
+    if (month < cycleOf(today())) {
+      const next = withCarry(emp, addMonths(month, 1), src, 4);
+      if (next.carryIn > 0 && next.carryFrom === month) { s.carryOut = next.carryIn; s.carryTo = next.month; s.balance = round2(s.balance - next.carryIn); }
+    }
+    return s;
+  }
   function salaryFor(emp, month) {
     const mine = (t) => rows(t).filter((x) => x.employeeId === emp.id);
-    return calcSalary(emp, month, { exp: mine('EmployeeExpenses'), adv: mine('SalaryAdvances'), pays: mine('SalaryPayments'), sheet: S.salarySheet, leaves: (S.leaveDays || []).filter((l) => l.employeeId === emp.id) });
+    return salaryWithCarry(emp, month, { exp: mine('EmployeeExpenses'), adv: mine('SalaryAdvances'), pays: mine('SalaryPayments'), sheet: S.salarySheet, leaves: (S.leaveDays || []).filter((l) => l.employeeId === emp.id) });
   }
 
   function salaryEmployees(month) {
@@ -801,8 +825,9 @@
   function openSalaryPay(empId, month) {
     const emp = byId('Employees', empId);
     const s = salaryFor(emp, month);
-    const presets = { salaryMonth: month, employeeId: empId, baseSalary: s.base, expenses: s.expenses, advances: s.advances, deduction: s.deduction };
-    if (s.pay) openForm('SalaryPayments', Object.assign({}, s.pay, { baseSalary: s.base, expenses: s.expenses, advances: s.advances, deduction: s.deduction }));
+    const exp = round2(s.expenses + (s.carryIn || 0) - (s.carryOut || 0));
+    const presets = { salaryMonth: month, employeeId: empId, baseSalary: s.base, expenses: exp, advances: s.advances, deduction: s.deduction };
+    if (s.pay) openForm('SalaryPayments', Object.assign({}, s.pay, { baseSalary: s.base, expenses: exp, advances: s.advances, deduction: s.deduction }));
     else openForm('SalaryPayments', null, presets);
   }
 
@@ -1331,7 +1356,8 @@
       h += '<div class="card">' + dataTable('salary-sheet', [
         { k: 'name', l: 'Employee', primary: true, v: (s) => s.emp.name, f: (s) => '<a href="#/employees/' + encodeURIComponent(s.emp.id) + '"><b>' + esc(s.emp.name) + '</b></a><div class="cell-sub">' + esc(s.emp.designation || '') + '</div>' },
         { k: 'base', l: 'Base', r: true, total: true, v: (s) => s.base, f: (s) => inr(s.base) },
-        { k: 'expenses', l: '+ Expenses', r: true, total: true, v: (s) => s.expenses, f: (s) => s.expenses ? '<span class="pos">' + inr(s.expenses) + '</span>' : '' },
+        { k: 'expenses', l: '+ Expenses', r: true, total: true, v: (s) => s.expenses, f: (s) => (s.expenses ? '<span class="pos">' + inr(s.expenses) + '</span>' : '') + (s.carryOut ? '<div class="cell-sub">' + inr(s.carryOut) + ' → ' + esc(fmtMonth(s.carryTo)) + '</div>' : '') },
+        { k: 'carry', l: '+ Last month’s unpaid exp.', r: true, total: true, v: (s) => s.carryIn || 0, f: (s) => (s.carryIn ? '<span class="pos">' + inr(s.carryIn) + '</span><div class="cell-sub">from ' + esc(fmtMonth(s.carryFrom)) + '</div>' : '') },
         { k: 'advances', l: '− Advances', r: true, total: true, v: (s) => s.advances, f: (s) => s.advances ? '<span class="neg">' + inr(s.advances) + '</span>' : '' },
         { k: 'leave', l: 'Leave days', r: true, total: true, plain: true, v: (s) => s.absentDays, f: (s) => s.absentDays ? esc(s.absentDays) : '' },
         { k: 'adj', l: '± Leave / other', r: true, v: (s) => s.bonus - s.deduction, f: (s) => s.bonus - s.deduction ? inr(s.bonus - s.deduction) : '' },
@@ -1470,11 +1496,13 @@
     h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Salary slip · ' + esc(fmtMonth(month)) + ' <span class="small muted">(' + esc(cycleLabel(month)) + ')</span></h2>' + statusBadge(status) + '</div><div class="card-body"><div class="breakdown">' +
       '<span>Base salary</span><span class="num">' + inr(s.base) + '</span>' +
       '<span>+ Expenses (' + s.exp.length + ')</span><span class="num pos">' + inr(s.expenses) + '</span>' +
+      (s.carryIn ? '<span>+ Unpaid expenses of ' + esc(fmtMonth(s.carryFrom)) + '</span><span class="num pos">' + inr(s.carryIn) + '</span>' : '') +
       '<span>− Advances (' + s.adv.length + ')</span><span class="num neg">' + inr(s.advances) + '</span>' +
       (s.deduction ? '<span>− ' + (s.leaveCut ? (s.absentDays ? 'Leave / absent (' + s.absentDays + ' day' + (s.absentDays === 1 ? '' : 's') + ')' : 'Part month (as per Salary Sheet)') : 'Other deduction') + '</span><span class="num neg">' + inr(s.deduction) + '</span>' : '') +
       (s.bonus ? '<span>+ Bonus / incentive</span><span class="num pos">' + inr(s.bonus) + '</span>' : '') +
       '<span class="total">Net payable</span><span class="total num">' + inr(s.net) + '</span>' +
       '<span>Paid' + (s.pay ? ' on ' + esc(fmtDate(s.pay.paidDate)) : '') + '</span><span class="num">' + inr(s.paid) + '</span>' +
+      (s.carryOut ? '<span>→ Unpaid expenses moved to ' + esc(fmtMonth(s.carryTo)) + ' salary</span><span class="num">' + inr(s.carryOut) + '</span>' : '') +
       (s.pay && Math.abs(s.balance) > 0.009 ? '<span>Balance</span><span class="num neg">' + inr(s.balance) + '</span>' : '') +
       '</div>' + (canWrite() ? '<div style="margin-top:16px"><button class="btn ' + (s.pay ? '' : 'primary') + '" data-act="pay" data-id="' + esc(e.id) + '" data-month="' + month + '">' + icon('pay') + (s.pay ? 'Edit payment' : 'Pay salary') + '</button></div>' : '') +
       '</div></div>';
@@ -2386,7 +2414,7 @@
   // ---------------------------------------------------------------------------
   function mySalary(month) {
     const me = S.me;
-    return calcSalary(me.employee, month, { exp: me.expenses || [], adv: me.advances || [], pays: me.payments || [], sheet: me.salarySheet, leaves: me.leaveDays || [] });
+    return salaryWithCarry(me.employee, month, { exp: me.expenses || [], adv: me.advances || [], pays: me.payments || [], sheet: me.salarySheet, leaves: me.leaveDays || [] });
   }
 
   function viewMe() {
@@ -2416,11 +2444,13 @@
     h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Salary slip · ' + esc(fmtMonth(st.month)) + ' <span class="small muted">(' + esc(cycleLabel(st.month)) + ')</span></h2>' + statusBadge(status) + '</div><div class="card-body"><div class="breakdown">' +
       '<span>Base salary</span><span class="num">' + inr(s.base) + '</span>' +
       '<span>+ Expenses</span><span class="num pos">' + inr(s.expenses) + '</span>' +
+      (s.carryIn ? '<span>+ Unpaid expenses of ' + esc(fmtMonth(s.carryFrom)) + '</span><span class="num pos">' + inr(s.carryIn) + '</span>' : '') +
       '<span>− Advances</span><span class="num neg">' + inr(s.advances) + '</span>' +
       (s.deduction ? '<span>− ' + (s.leaveCut ? (s.absentDays ? 'Leave / absent (' + s.absentDays + ' day' + (s.absentDays === 1 ? '' : 's') + ')' : 'Part month (as per Salary Sheet)') : 'Other deduction') + '</span><span class="num neg">' + inr(s.deduction) + '</span>' : '') +
       (s.bonus ? '<span>+ Bonus / other</span><span class="num pos">' + inr(s.bonus) + '</span>' : '') +
       '<span class="total">Net payable</span><span class="total num">' + inr(s.net) + '</span>' +
       '<span>Paid' + (s.pay ? ' on ' + esc(fmtDate(s.pay.paidDate)) + (s.pay.mode ? ' · ' + esc(s.pay.mode) : '') : '') + '</span><span class="num">' + inr(s.paid) + '</span>' +
+      (s.carryOut ? '<span>→ Unpaid expenses moved to ' + esc(fmtMonth(s.carryTo)) + ' salary</span><span class="num">' + inr(s.carryOut) + '</span>' : '') +
       '</div>' + (e.bankDetails ? '<p class="small muted" style="margin-bottom:0">Paid to: ' + esc(e.bankDetails) + '</p>' : '') + '</div></div>';
     const hist = [];
     for (let i = 0; i < 12; i++) {
