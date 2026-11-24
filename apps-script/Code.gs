@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.10';
+const API_VERSION = '2026-11-24.11';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -387,6 +387,7 @@ function saveRecord_(user, table, rec, newId) {
   if (!def || !def.editable) throw err_('Invalid table');
   needRole_(user, WRITE_ROLES);
   rec = sanitize_(table, rec || {});
+  if ((table === 'EmployeeExpenses' || table === 'SalaryAdvances') && /^\d{4}-\d{2}-\d{2}$/.test(String(rec.date || ''))) rec.salaryMonth = String(rec.date).slice(0, 7); // month-wise
   (def.required || []).forEach(function (k) {
     if (rec[k] === '' || rec[k] === undefined || rec[k] === null) throw err_('Missing field: ' + k);
   });
@@ -2146,7 +2147,7 @@ function syncDayBookRun_(user) {
       res.removed++;
     });
     lock.waitLock(30000);
-    try { flushRun_(user); } finally { lock.releaseLock(); }
+    try { flushRun_(user); res.monthsFixed = fixMonths_(); } finally { lock.releaseLock(); }
     mark('saved');
   } finally {
     RUN_ = null;
@@ -2161,6 +2162,28 @@ function syncDayBookRun_(user) {
   writeSettings_(user, entries);
   if (res.added || res.changed || res.removed) audit_(user, 'sync', 'Day Book', '', summary);
   return Object.assign(res, { summary: summary });
+}
+
+// Month-wise: an expense or advance always counts in the month of its date.
+// Entries saved earlier with another month are put right (one write per tab).
+function fixMonths_() {
+  let n = 0;
+  ['EmployeeExpenses', 'SalaryAdvances'].forEach(function (t) {
+    const sh = sheet_(t);
+    const values = sh.getDataRange().getValues();
+    if (values.length < 2) return;
+    const head = values[0].map(String);
+    const dc = head.indexOf('date'), mc = head.indexOf('salaryMonth');
+    if (dc < 0 || mc < 0) return;
+    const col = values.slice(1).map(function (r) {
+      const d = r[dc] instanceof Date ? Utilities.formatDate(r[dc], TZ, 'yyyy-MM') : String(r[dc]).slice(0, 7);
+      const m = r[mc] instanceof Date ? Utilities.formatDate(r[mc], TZ, 'yyyy-MM') : String(r[mc]).slice(0, 7);
+      if (/^\d{4}-\d{2}$/.test(d) && d !== m) { n++; return [d]; }
+      return [r[mc] instanceof Date ? m : r[mc]];
+    });
+    if (n) sh.getRange(2, mc + 1, col.length, 1).setNumberFormat('@').setValues(col);
+  });
+  return n;
 }
 
 // A sync marks itself running for up to 6 minutes (Google's limit per run).

@@ -261,11 +261,11 @@
         { k: 'employeeId', l: 'Employee', t: 'ref', ref: 'Employees', req: true },
         { k: 'expenseType', l: 'Expense type', t: 'select', list: 'expenseTypes', req: true },
         { k: 'clientId', l: 'Client / Site (optional)', t: 'ref', ref: 'Clients' },
-        { k: 'fromTo', l: 'From → To', t: 'text', full: true, hint: 'e.g. Office → Sector 62 site → Office', show: (f) => isKmType(f.get('expenseType')) },
+        { k: 'fromTo', l: 'From → To / details', t: 'text', full: true, hint: 'e.g. Office → Sector 62 site → Office, or what was bought' },
         { k: 'km', l: 'Distance (km)', t: 'number', show: (f) => isKmType(f.get('expenseType')) },
         { k: 'rate', l: 'Rate per km (₹)', t: 'money', show: (f) => isKmType(f.get('expenseType')) },
         { k: 'amount', l: 'Amount (₹)', t: 'money', req: true, readonly: (f) => isKmType(f.get('expenseType')) },
-        { k: 'salaryMonth', l: 'Add to salary of', t: 'month', req: true, def: thisMonth, hint: 'Amount gets added to this month’s salary' },
+        { k: 'salaryMonth', l: 'Added to salary of', t: 'month', req: true, def: thisMonth, readonly: () => true, hint: 'Always the month of the date (month-wise)' },
         { k: 'officeCategory', l: 'Bought for the office? Office category', t: 'select', list: 'officeCategories', hint: 'Choose a category if this was bought for the office (milk, stationery…). It then also shows under Office expenses.', show: (f) => !isKmType(f.get('expenseType')) },
         { k: 'notes', l: 'Notes', t: 'textarea', full: true },
       ],
@@ -276,10 +276,11 @@
           f.set('rate', num(e && e.perKmRate) || num(S.settings.company.perKmRate));
         }
         if (km) f.set('amount', round2(num(f.get('km')) * num(f.get('rate'))));
-        if (key === 'date' && !f.touched('salaryMonth')) f.set('salaryMonth', monthOf(f.get('date')));
+        monthFromDate(f, key);
       },
       beforeSave(r) {
-        if (!isKmType(r.expenseType)) { r.km = ''; r.rate = ''; r.fromTo = ''; }
+        if (!isKmType(r.expenseType)) { r.km = ''; r.rate = ''; }
+        r.salaryMonth = monthOf(r.date);
       },
     },
     SalaryAdvances: {
@@ -289,12 +290,11 @@
         { k: 'employeeId', l: 'Employee', t: 'ref', ref: 'Employees', req: true },
         { k: 'amount', l: 'Amount (₹)', t: 'money', req: true },
         { k: 'mode', l: 'Payment mode', t: 'select', list: 'paymentModes', def: () => 'Cash' },
-        { k: 'salaryMonth', l: 'Deduct from salary of', t: 'month', req: true, def: thisMonth },
+        { k: 'salaryMonth', l: 'Deducted from salary of', t: 'month', req: true, def: thisMonth, readonly: () => true, hint: 'Always the month of the date (month-wise)' },
         { k: 'notes', l: 'Notes', t: 'textarea', full: true },
       ],
-      onChange(f, key) {
-        if (key === 'date' && !f.touched('salaryMonth')) f.set('salaryMonth', monthOf(f.get('date')));
-      },
+      onChange(f, key) { monthFromDate(f, key); },
+      beforeSave(r) { r.salaryMonth = monthOf(r.date); },
     },
     SalaryPayments: {
       title: 'Salary payment',
@@ -375,6 +375,16 @@
     const paid = pay ? num(pay.paidAmount) : 0;
     return { emp, month, exp, adv, pay, base, expenses, advances, deduction, leaveDays, absentDays, leaveCut: manual ? 0 : leaveCut, fromSheet: !!sheet, bonus, net, paid, balance: round2(net - paid) };
   }
+  // Month-wise: the salary month is always the month of the date. When the form
+  // is opened from a past month's page, the date starts in that month.
+  function monthFromDate(f, key) {
+    if (key === '__init' && f.isNew) {
+      const want = f.get('salaryMonth');
+      if (want && want < thisMonth() && monthOf(f.get('date')) !== want) f.set('date', monthEnd(want));
+    }
+    if (f.get('date')) f.set('salaryMonth', monthOf(f.get('date')));
+  }
+
   function salaryFor(emp, month) {
     const mine = (t) => rows(t).filter((x) => x.employeeId === emp.id);
     return calcSalary(emp, month, { exp: mine('EmployeeExpenses'), adv: mine('SalaryAdvances'), pays: mine('SalaryPayments'), sheet: S.salarySheet, leaves: (S.leaveDays || []).filter((l) => l.employeeId === emp.id) });
@@ -719,6 +729,7 @@
       get: (k) => { const el = form.elements[k]; return el ? el.value : ''; },
       set: (k, v) => { const el = form.elements[k]; if (el && el.value !== String(v)) el.value = v; },
       touched: (k) => touched.has(k),
+      isNew: isNew,
     };
     const refresh = (key) => {
       if (def.onChange) def.onChange(api_, key);
@@ -909,7 +920,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.10';
+  const NEEDED_API = '2026-11-24.11';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
