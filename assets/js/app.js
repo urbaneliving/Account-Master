@@ -518,6 +518,7 @@
     S.leaves = r.leaves || [];
     S.apiVersion = r.apiVersion || '';
     S.salarySheet = r.salarySheet || {};
+    S.tabAdvances = r.tabAdvances || {};
     S.leaveDays = r.leaveDays || [];
   }
 
@@ -936,7 +937,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.13';
+  const NEEDED_API = '2026-11-24.14';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -1400,6 +1401,22 @@
       ], list_, { actions: (r) => rowActions('EmployeeExpenses', r), name: 'Employee expenses ' + st.month, sort: { k: 'date', dir: 'desc' }, empty: 'No expenses for this month' }) + '</div>';
     } else if (st.tab === 'advances') {
       const adv = rows('SalaryAdvances').filter((a) => (st.scope === 'all' || a.salaryMonth === st.month) && (!st.emp || a.employeeId === st.emp) && matchQ('salary', empName(a.employeeId), a.notes));
+      if (st.scope !== 'all') {
+        // Day Book (money actually paid) vs what is written in the employee's own tab
+        const tab = (S.tabAdvances || {})[st.month] || {};
+        const ids = Array.from(new Set(rows('SalaryAdvances').filter((a) => a.salaryMonth === st.month).map((a) => a.employeeId).concat(Object.keys(tab))));
+        const chk = ids.map((id) => ({ id, name: empName(id), book: sum(rows('SalaryAdvances').filter((a) => a.salaryMonth === st.month && a.employeeId === id), 'amount'), tab: id in tab ? num(tab[id]) : null }));
+        const bad = chk.filter((x) => x.tab !== null && Math.abs(x.book - x.tab) > 0.5);
+        if (chk.length) {
+          h += '<div class="card" style="margin-bottom:12px"><div class="card-head"><h2>Check · ' + esc(fmtMonth(st.month)) + '</h2>' + (bad.length ? '<span class="badge bad">⚠ ' + bad.length + ' to check</span>' : '<span class="badge good">All match</span>') + '</div>' + dataTable('adv-check', [
+            { k: 'name', l: 'Employee', primary: true, f: (x) => '<b>' + esc(x.name) + '</b>' },
+            { k: 'book', l: 'Advances (Day Book / dashboard)', r: true, total: true, v: (x) => x.book, f: (x) => inr(x.book) },
+            { k: 'tab', l: 'In employee’s own sheet tab', r: true, v: (x) => x.tab || 0, f: (x) => (x.tab === null ? '<span class="muted">no tab</span>' : inr(x.tab)) },
+            { k: 'diff', l: 'Difference', r: true, v: (x) => (x.tab === null ? 0 : x.book - x.tab), f: (x) => (x.tab === null ? '' : Math.abs(x.book - x.tab) > 0.5 ? '<span class="neg">⚠ ' + inr(x.book - x.tab) + '</span>' : '<span class="pos">✓</span>') },
+          ], chk, { name: 'Advance check', sort: { k: 'name', dir: 'asc' } }) +
+            '<p class="small muted" style="margin:8px 14px">The salary uses the Day Book (money actually paid). A difference means a line is in one place and not the other — open the employee below to see each advance.</p></div>';
+        }
+      }
       h += '<div class="filters">' + '<input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month"' + (st.scope === 'all' ? ' disabled' : '') + '>' + (st.scope === 'all' ? '' : rangeTag(st.month)) + selectFilter('salary', 'scope', 'Selected month', [['all', 'All months']]) + searchFilter('salary', 'Search…') + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('advances') + '</div>';
       h += '<div class="card">' + dataTable('advances', [
         { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },

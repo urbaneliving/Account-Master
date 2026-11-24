@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.13';
+const API_VERSION = '2026-11-24.14';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -367,6 +367,7 @@ function bootstrapRun_(user) {
     defaultRules: WRITE_ROLES.indexOf(user.role) >= 0 ? defaultDayBookRules_() : [],
     leaves: leaveList_(user),
     salarySheet: accounts ? salarySheetMonths_() : {},
+    tabAdvances: accounts ? settingJson_('tabAdvances', {}) : {},
     leaveDays: accounts ? approvedLeaves_() : [],
     attendanceToday: attendanceToday_(user),
     users: users.map(function (u) {
@@ -1010,6 +1011,11 @@ function mySelf_(user) {
   };
 }
 
+function settingJson_(key, dflt) {
+  const row = readTable_('Settings').filter(function (r) { return r.key === key; })[0];
+  try { return row ? JSON.parse(row.value) || dflt : dflt; } catch (e) { return dflt; }
+}
+
 // The accountant's Salary Sheet, month by month: { 'yyyy-MM': { firstname: { salary, absent, advance, pay } } }
 function salarySheetMonths_() {
   const row = readTable_('Settings').filter(function (r) { return r.key === 'salarySheet'; })[0];
@@ -1468,6 +1474,7 @@ function mirrorSyncAll_(user) {
 const DAYBOOK_TAG = '[daybook]';
 let SALARY_INFO_ = {};
 let SALARY_MONTHS_ = {};
+let TAB_ADVANCES_ = {}; // advances written in each employee's own tab: { 'yyyy-MM': { employeeId: amount } }
 let SYNC_BUDGET_MS_ = 240000; // ~4 of the 6 minutes Google allows per run
 
 function cleanRule_(r) {
@@ -1538,7 +1545,8 @@ function dayBookRules_() {
 }
 
 function linkSummary_(c) {
-  return (c.kind + ' ' + (c.client || c.employee || c.category || c.why || '') + (c.costType ? ' ' + c.costType : '') + (c.salaryMonth ? ' ' + c.salaryMonth : '') + (c.officeCategory ? ' office:' + c.officeCategory : '')).slice(0, 200);
+  return (c.kind + ' ' + (c.client || c.employee || c.category || c.why || '') + (c.costType ? ' ' + c.costType : '') + (c.salaryMonth ? ' ' + c.salaryMonth : '') + (c.officeCategory ? ' office:' + c.officeCategory : '') +
+    (c.parts ? ' split:' + c.parts.map(function (p) { return p.kind[0] + p.amount + (p.employee || '').slice(0, 6); }).join('/') : '')).slice(0, 200);
 }
 
 function costTypeOf_(t, narr) {
@@ -1575,6 +1583,16 @@ function salaryMonthOf_(date, cutoff) {
 }
 
 // Decide what one Day Book line is. Returns { kind, ... } without saving.
+// A person's monthly salary: latest Salary Sheet block that has them, else their employee record.
+function knownSalary_(name) {
+  const key = String(name).trim().split(/\s+/)[0].toLowerCase();
+  if ((SALARY_INFO_ || {})[key]) return Number(SALARY_INFO_[key].salary) || 0;
+  const months = Object.keys(SALARY_MONTHS_ || {}).sort().reverse();
+  for (let i = 0; i < months.length; i++) if (SALARY_MONTHS_[months[i]][key]) return Number(SALARY_MONTHS_[months[i]][key].salary) || 0;
+  const e = (RUN_ ? runEmployees_() : []).filter(function (x) { return String(x.name).trim().toLowerCase() === String(name).trim().toLowerCase(); })[0];
+  return e ? Number(e.monthlySalary) || 0 : 0;
+}
+
 function classifyLine_(line, rules) {
   const narr = line.narration.toLowerCase();
   const rem = line.remarks.toLowerCase();
@@ -1600,7 +1618,45 @@ function classifyLine_(line, rules) {
     if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Money in from an employee' });
     let k = rule.action === 'staff' ? null : rule.action;
     if (!k) k = /salary\s*adv|adv(ance)?\.?\s*salary/.test(both) ? 'salary' : /advance|adv\b|imprest/.test(both) ? 'advance' : /salary|salry|full and final|conveyance|kkbk/.test(both) ? 'salary' : rule.fallback;
-    return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: k === 'advance' ? cycleOf_(line.date) : workMonthOf_(line.date) });
+    const monthFor = function (kind) { return kind === 'advance' ? cycleOf_(line.date) : workMonthOf_(line.date); };
+    const out = Object.assign(base, { kind: k, employee: rule.target, salaryMonth: monthFor(k) });
+    const num = function (x) { return Number(String(x).replace(/,/g, '')) || 0; };
+    // "Saban Jha ( Salary - 500, Advance - 1000 )": one payment, two parts
+    const sm = both.match(/salary\s*[-:=]?\s*(?:rs\.?|₹)?\s*(\d[\d,]*)/), am = both.match(/adv(?:ance)?\s*[-:=]?\s*(?:rs\.?|₹)?\s*(\d[\d,]*)/);
+    if (sm && am && num(sm[1]) > 0 && num(am[1]) > 0 && Math.abs(num(sm[1]) + num(am[1]) - amount) < 1) {
+      out.parts = [
+        { kind: 'salary', employee: rule.target, amount: num(sm[1]), salaryMonth: monthFor('salary') },
+        { kind: 'advance', employee: rule.target, amount: num(am[1]), salaryMonth: monthFor('advance') },
+      ];
+      return out;
+    }
+    // "Prem Jha & Cleaner Aunty Salary Adv": one payment for two people. The
+    // others get their salary from the Salary Sheet; the first named gets the rest.
+    if (k === 'salary') {
+      const people = [];
+      rules.forEach(function (r) {
+        if (['staff', 'salary', 'advance'].indexOf(r.action) < 0 || !r.target || (r.dir !== 'any' && r.dir !== dir)) return;
+        const text = r.field === 'narration' ? narr : r.field === 'remarks' ? rem : both;
+        if (!r.match || !has(text, r.match) || (r.unless && has(both, r.unless))) return;
+        if (people.some(function (x) { return x.target === r.target; })) return;
+        const pos = Math.min.apply(null, r.match.split(',').map(function (w) { const i = both.indexOf(w.trim()); return i < 0 ? 1e9 : i; }));
+        people.push({ target: r.target, pos: pos });
+      });
+      if (people.length > 1) {
+        people.sort(function (a, b) { return a.pos - b.pos; });
+        let left = amount;
+        const parts = [];
+        people.slice(1).forEach(function (pp) {
+          const sal = knownSalary_(pp.target);
+          if (sal > 0 && sal < left) { parts.push({ kind: 'salary', employee: pp.target, amount: sal, salaryMonth: monthFor('salary') }); left -= sal; }
+        });
+        if (parts.length) {
+          out.parts = [{ kind: 'salary', employee: people[0].target, amount: left, salaryMonth: monthFor('salary') }].concat(parts);
+          out.employee = people[0].target;
+        }
+      }
+    }
+    return out;
   }
   if (rule && rule.action === 'site') return Object.assign(base, { kind: dir === 'in' ? 'ignore' : 'site', client: rule.target || 'Unassigned site work', costType: rule.costType || costTypeOf_(both, narr) });
   if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Receipt with no matching client rule' });
@@ -1690,6 +1746,12 @@ function appendMany_(table, objs) {
 // Undo what a link did in the dashboard.
 function revertLink_(user, link) {
   if (!link.recordId) return;
+  if (link.recordTable === 'MULTI') {
+    let parts = [];
+    try { parts = JSON.parse(link.recordId); } catch (e) { parts = []; }
+    parts.forEach(function (p) { revertLink_(user, { recordTable: p.t, recordId: p.id, amount: p.a }); });
+    return;
+  }
   if (link.recordTable === 'SalaryPayments') {
     const p = RUN_ ? RUN_.sal[link.recordId] : readTable_('SalaryPayments').filter(function (x) { return x.id === link.recordId; })[0];
     if (!p) return;
@@ -1837,6 +1899,13 @@ function runEmployees_() {
 
 // Apply one classified line; returns { recordTable, recordId, amount }.
 function applyLine_(user, c, ref) {
+  if (c.parts && c.parts.length) {
+    const done = c.parts.map(function (p) {
+      const a = applyLine_(user, Object.assign({}, c, p, { parts: null, desc: c.desc + ' [part ' + inr_(p.amount) + ']' }), ref);
+      return { t: a.recordTable, id: a.recordId, a: p.amount };
+    });
+    return { recordTable: 'MULTI', recordId: JSON.stringify(done), amount: c.amount };
+  }
   const now = new Date().toISOString();
   const meta = { createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now };
   const note = 'Day Book ' + ref + ' ' + DAYBOOK_TAG;
@@ -1959,6 +2028,8 @@ function parseExpenseTab_(tab, defaultRate) {
   const anchor = sure.length ? sure[Math.floor(sure.length / 2)] : '';
   const seenAt = {};
   const tableAt = {};
+  const tabAdv = [];
+  lines.advances = tabAdv;
   v.forEach(function (row, ri) {
     row.forEach(function (x, ci) { if (String(x).trim().toLowerCase() === 'date') tableAt[ci] = ri; });
     for (let c = 0; c < row.length; c++) {
@@ -1973,7 +2044,12 @@ function parseExpenseTab_(tab, defaultRate) {
         if (km && rate && rate <= 20 && km > rate) { line = { desc: text, km: km, rate: rate, amount: cellNum_(e) || Math.round(km * rate) }; c += 4; }
         else if (cellNum_(b)) { line = { desc: text, amount: cellNum_(b) }; c += 2; }
         else if (/^[-\s]*$/.test(String(b)) && /^[-\s]*$/.test(String(d)) && cellNum_(e)) { line = { desc: text, amount: cellNum_(e) }; c += 4; }
-        else { c += 3; continue; } // CR only (money given to the employee) or no amount
+        else {
+          // CR only = money given to the employee (an advance if it says so)
+          if (/advance|\badv\b/i.test(text) && cellNum_(d) > 0) tabAdv.push({ date: date, amount: cellNum_(d) });
+          c += 3; continue;
+        }
+        if (/advance|\badv\b/i.test(text) && !/salary paid/i.test(text)) tabAdv.push({ date: date, amount: line.amount });
         if (/advance|\badv\b|salary|total|imprest|^paid$|^done$/i.test(text)) continue;
       } else if (cellNum_(a)) {
         const km = cellNum_(a);
@@ -2017,7 +2093,13 @@ function expenseLines_(ss, dayBookTab) {
   const out = [];
   expenseTabs_(ss, dayBookTab).forEach(function (t) {
     const seen = {};
-    parseExpenseTab_(t, rate).forEach(function (l) {
+    const parsed = parseExpenseTab_(t, rate);
+    (parsed.advances || []).forEach(function (a) {
+      const m = cycleOf_(a.date);
+      const o = TAB_ADVANCES_[m] = TAB_ADVANCES_[m] || {};
+      o[t.emp.id] = (o[t.emp.id] || 0) + a.amount;
+    });
+    parsed.forEach(function (l) {
       const sig = [t.name, l.date, l.desc, l.amount, l.km || ''].join('|');
       seen[sig] = (seen[sig] || 0) + 1;
       const key = 'XS-' + Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, sig, Utilities.Charset.UTF_8)).replace(/[^A-Za-z0-9]/g, '').slice(0, 12) + '-' + seen[sig];
@@ -2084,6 +2166,7 @@ function syncDayBookRun_(user) {
       res.undoneImport = i.tag;
     });
     SALARY_MONTHS_ = {};
+    TAB_ADVANCES_ = {};
     const rules = dayBookRules_();
     SALARY_INFO_ = readSalarySheet_(m.ss);
     const links = {};
@@ -2170,6 +2253,7 @@ function syncDayBookRun_(user) {
   const after = readSettings_();
   const entries = [['mirror', Object.assign(after.mirror, { lastSync: new Date().toISOString(), lastResult: summary, lastError: '' })]];
   if (Object.keys(SALARY_MONTHS_).length) entries.push(['salarySheet', SALARY_MONTHS_]);
+  if (cfg.expenseTabs !== false && !res.more) entries.push(['tabAdvances', TAB_ADVANCES_]);
   if (res.undoneImport) entries.push(['imports', after.imports.map(function (i) { if (!i.undone && /^DAYBOOK/.test(i.tag)) { i.undone = new Date().toISOString(); i.undoneBy = user.email; } return i; })]);
   writeSettings_(user, entries);
   if (res.added || res.changed || res.removed) audit_(user, 'sync', 'Day Book', '', summary);
