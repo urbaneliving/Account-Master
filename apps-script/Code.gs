@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.9';
+const API_VERSION = '2026-11-24.10';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -1808,7 +1808,10 @@ function ensureNamed_(user, table, name, extra) {
     if (s.joiningDate) o.joiningDate = s.joiningDate;
     if (RUN_) RUN_.emps = null;
   }
-  appendObj_(table, o);
+  const lk = LockService.getScriptLock();
+  const mine = !lk.hasLock();
+  if (mine) lk.waitLock(30000);
+  try { appendObj_(table, o); } finally { if (mine) lk.releaseLock(); }
   map[key] = o.id;
   return o.id;
 }
@@ -2035,8 +2038,11 @@ function syncDayBookRun_(user) {
   const settings = readSettings_();
   const cfg = settings.mirror;
   if (!cfg.readEnabled) throw err_('Turn on “Read the Day Book into the dashboard” first');
+  // Only one sync at a time. Reading the sheets happens WITHOUT the data lock,
+  // so saving a salary or expense never waits for a sync; the lock is held only
+  // for the few seconds the sync writes.
+  if (!claimSync_()) return { busy: true, added: 0, changed: 0, removed: 0, summary: 'Another Day Book sync is already running — it will finish in a moment.' };
   const lock = LockService.getScriptLock();
-  lock.waitLock(60000);
   const res = { added: 0, changed: 0, removed: 0, ignored: 0, unchanged: 0, expenses: 0, tabs: [] };
   // Google stops a run after 6 minutes. Stop taking new lines after ~4 minutes,
   // save what is done, and let the next run carry on from there.
@@ -2108,9 +2114,12 @@ function syncDayBookRun_(user) {
       mark('day book');
     }
     // Everyone in the Salary Sheet becomes an employee (so My account works for all).
-    Object.keys(SALARY_INFO_).forEach(function (k) { ensureNamed_(user, 'Employees', SALARY_INFO_[k].name); });
-    RUN_.emps = null;
-    res.salaryUpdated = applySalarySheet_(user, SALARY_INFO_);
+    lock.waitLock(30000);
+    try {
+      Object.keys(SALARY_INFO_).forEach(function (k) { ensureNamed_(user, 'Employees', SALARY_INFO_[k].name); });
+      RUN_.emps = null;
+      res.salaryUpdated = applySalarySheet_(user, SALARY_INFO_);
+    } finally { lock.releaseLock(); }
     mark('salary sheet');
     if (cfg.expenseTabs !== false && !res.more && overBudget()) res.more = true;
     if (cfg.expenseTabs !== false && !res.more) {
@@ -2136,14 +2145,15 @@ function syncDayBookRun_(user) {
       runDel_('DayBookLinks', id);
       res.removed++;
     });
-    flushRun_(user);
+    lock.waitLock(30000);
+    try { flushRun_(user); } finally { lock.releaseLock(); }
     mark('saved');
   } finally {
     RUN_ = null;
-    lock.releaseLock();
+    releaseSync_();
   }
   res.timing = timing.join(', ');
-  const summary = (res.noDayBook ? 'No "' + cfg.tab + '" tab found. ' : '') + res.added + ' added, ' + res.changed + ' changed, ' + res.removed + ' removed, ' + res.ignored + ' ignored' + (res.expenses ? ', ' + res.expenses + ' employee expense lines read from ' + res.tabs.length + ' tabs' : '') + (res.salaryUpdated ? ', ' + res.salaryUpdated + ' salaries updated from the Salary Sheet' : '') + (res.undoneImport ? ' (old file import ' + res.undoneImport + ' replaced)' : '') + (res.more ? ' — part done, continuing' : '');
+  const summary = (res.noDayBook ? 'No "' + cfg.tab + '" tab found. ' : '') + res.added + ' added, ' + res.changed + ' changed, ' + res.removed + ' removed, ' + res.ignored + ' ignored' + (res.expenses ? ', ' + res.expenses + ' employee expense lines read from ' + res.tabs.length + ' tabs' : '') + (res.salaryUpdated ? ', ' + res.salaryUpdated + ' salaries updated from the Salary Sheet' : '') + (res.undoneImport ? ' (old file import ' + res.undoneImport + ' replaced)' : '') + (res.more ? ' — part done, continuing' : '') + ' · took ' + res.timing;
   const after = readSettings_();
   const entries = [['mirror', Object.assign(after.mirror, { lastSync: new Date().toISOString(), lastResult: summary, lastError: '' })]];
   if (Object.keys(SALARY_MONTHS_).length) entries.push(['salarySheet', SALARY_MONTHS_]);
@@ -2151,6 +2161,22 @@ function syncDayBookRun_(user) {
   writeSettings_(user, entries);
   if (res.added || res.changed || res.removed) audit_(user, 'sync', 'Day Book', '', summary);
   return Object.assign(res, { summary: summary });
+}
+
+// A sync marks itself running for up to 6 minutes (Google's limit per run).
+function claimSync_() {
+  const lk = LockService.getScriptLock();
+  lk.waitLock(30000);
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const at = Number(props.getProperty('SYNC_RUNNING') || 0);
+    if (at && Date.now() - at < 6 * 60000) return false;
+    props.setProperty('SYNC_RUNNING', String(Date.now()));
+    return true;
+  } finally { lk.releaseLock(); }
+}
+function releaseSync_() {
+  try { PropertiesService.getScriptProperties().deleteProperty('SYNC_RUNNING'); } catch (e) { /* ignore */ }
 }
 
 /** Time trigger target (every 15 minutes). */
