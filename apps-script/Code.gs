@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.1';
+const API_VERSION = '2026-11-24.2';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -153,6 +153,7 @@ function doGet() {
 }
 
 function doPost(e) {
+  resetMemo_();
   let req;
   try {
     req = JSON.parse(e.postData.contents);
@@ -340,6 +341,11 @@ function changePassword_(user, oldPassword, newPassword) {
 // Data
 // ---------------------------------------------------------------------------
 function bootstrap_(user) {
+  TABLE_MEMO_ = {}; // read-only request: read each tab once
+  try { return bootstrapRun_(user); } finally { TABLE_MEMO_ = null; }
+}
+
+function bootstrapRun_(user) {
   const data = {};
   const accounts = ACCOUNTS_ROLES.indexOf(user.role) >= 0;
   Object.keys(SCHEMA).forEach(function (t) {
@@ -678,7 +684,19 @@ function resetPassword_(user, id, password, sendEmail) {
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
+// Per-request memory: the spreadsheet is opened once, settings are read once
+// (until they are written), and a read-only request reads each tab once.
+let SS_ = null;
+let SETTINGS_MEMO_ = null;
+let TABLE_MEMO_ = null;
+function resetMemo_() { SS_ = null; SETTINGS_MEMO_ = null; TABLE_MEMO_ = null; }
+
 function readSettings_() {
+  if (!SETTINGS_MEMO_) SETTINGS_MEMO_ = JSON.stringify(readSettingsRaw_());
+  return JSON.parse(SETTINGS_MEMO_);
+}
+
+function readSettingsRaw_() {
   const s = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
   readTable_('Settings').forEach(function (r) {
     try {
@@ -774,6 +792,7 @@ function saveSettings_(user, settings) {
 }
 
 function writeSettings_(user, entries) {
+  SETTINGS_MEMO_ = null;
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -2569,7 +2588,7 @@ function auditRows_(user, limit) {
 // Sheet helpers
 // ---------------------------------------------------------------------------
 function ss_() {
-  return SpreadsheetApp.openById(SPREADSHEET_ID);
+  return SS_ || (SS_ = SpreadsheetApp.openById(SPREADSHEET_ID));
 }
 
 function sheet_(name) {
@@ -2641,6 +2660,14 @@ function rowToObj_(headers, row, types) {
 }
 
 function readTable_(name) {
+  if (TABLE_MEMO_) {
+    if (!TABLE_MEMO_[name]) TABLE_MEMO_[name] = readTableRaw_(name);
+    return TABLE_MEMO_[name].map(function (r) { return Object.assign({}, r); });
+  }
+  return readTableRaw_(name);
+}
+
+function readTableRaw_(name) {
   const values = sheet_(name).getDataRange().getValues();
   if (values.length < 2) return [];
   const headers = values[0].map(String);

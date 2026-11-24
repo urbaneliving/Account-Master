@@ -861,7 +861,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.1';
+  const NEEDED_API = '2026-11-24.2';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -3179,6 +3179,7 @@
         const r = await api('saveUser', { record: rec, password: isNew ? form.password.value : '', sendEmail: isNew && form.sendEmail.checked });
         await loadAll();
         if (!isNew) toast('Member updated');
+        else if (form.sendEmail.checked && !('emailed' in r)) toast('Member added. ' + 'Apps Script is not updated yet, so no email was sent — in Apps Script: Deploy → Manage deployments → ✏️ → Version: New version → Deploy', true);
         else if (r.emailed) toast('Member added — login details emailed to ' + rec.email);
         else if (form.sendEmail.checked) toast('Member added, but the email failed: ' + (r.emailError || 'unknown error') + '. Share the password yourself.', true);
         else toast('Member added');
@@ -3193,7 +3194,8 @@
       onSubmit: async (form) => {
         const r = await api('resetPassword', { id: u.id, password: form.password.value, sendEmail: form.sendEmail.checked });
         await loadAll();
-        if (r.emailed) toast('Password reset — emailed to ' + u.email);
+        if (form.sendEmail.checked && !('emailed' in r)) toast('Password reset. ' + 'Apps Script is not updated yet, so no email was sent — in Apps Script: Deploy → Manage deployments → ✏️ → Version: New version → Deploy', true);
+        else if (r.emailed) toast('Password reset — emailed to ' + u.email);
         else if (form.sendEmail.checked) toast('Password reset, but the email failed: ' + (r.emailError || 'unknown error') + '. Share the password with ' + u.name + ' yourself.', true);
         else toast('Password reset — share the new password with ' + u.name);
         renderPage();
