@@ -47,7 +47,23 @@
   const isoDate = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   const today = () => isoDate(new Date());
   const thisMonth = () => today().slice(0, 7);
-  const lastMonth = () => { const d = new Date(thisMonth() + '-01T00:00:00'); d.setDate(0); return isoDate(d).slice(0, 7); };
+  const lastMonth = () => addMonths(cycleOf(today()), -1); // salary due now = the cycle that ended last
+  // Salary month starts on the 10th: "October" = 10 Oct – 9 Nov (Settings → Company → cycle day).
+  const cycleDay = () => Math.min(28, Math.max(0, num(((S.settings || {}).company || {}).cycleDay)));
+  function cycleOf(date) {
+    const d = new Date(String(date || '').slice(0, 10) + 'T00:00:00');
+    if (isNaN(d)) return String(date || '').slice(0, 7);
+    if (d.getDate() < cycleDay()) d.setDate(0);
+    return isoDate(d).slice(0, 7);
+  }
+  function cycleRange(month) {
+    const cd = cycleDay();
+    if (cd <= 1) return { from: month + '-01', to: monthEnd(month) };
+    const p2 = (n) => String(n).padStart(2, '0');
+    return { from: month + '-' + p2(cd), to: addMonths(month, 1) + '-' + p2(cd - 1) };
+  }
+  const cycleLabel = (month) => { const r = cycleRange(month); return fmtDate(r.from) + ' – ' + fmtDate(r.to); };
+  const rangeTag = (month) => '<span class="badge" title="Salary month">' + esc(cycleLabel(month)) + '</span>';
   const monthOf = (d) => String(d || '').slice(0, 7);
   const addMonths = (m, n) => {
     const d = new Date(m + '-01T00:00:00');
@@ -280,7 +296,7 @@
       },
       beforeSave(r) {
         if (!isKmType(r.expenseType)) { r.km = ''; r.rate = ''; }
-        r.salaryMonth = monthOf(r.date);
+        r.salaryMonth = cycleOf(r.date);
       },
     },
     SalaryAdvances: {
@@ -294,7 +310,7 @@
         { k: 'notes', l: 'Notes', t: 'textarea', full: true },
       ],
       onChange(f, key) { monthFromDate(f, key); },
-      beforeSave(r) { r.salaryMonth = monthOf(r.date); },
+      beforeSave(r) { r.salaryMonth = cycleOf(r.date); },
     },
     SalaryPayments: {
       title: 'Salary payment',
@@ -342,9 +358,9 @@
   function leaveDaysIn(leaves, month) {
     let n = 0;
     (leaves || []).forEach((l) => {
-      if (l.type === 'Half day') { if ((l.fromDate || '').slice(0, 7) === month) n += 0.5; return; }
+      if (l.type === 'Half day') { if (cycleOf(l.fromDate) === month) n += 0.5; return; }
       const d = new Date(l.fromDate + 'T00:00:00'); const end = new Date((l.toDate || l.fromDate) + 'T00:00:00');
-      for (let i = 0; d <= end && i < 62; i++) { if (isoDate(d).slice(0, 7) === month) n++; d.setDate(d.getDate() + 1); }
+      for (let i = 0; d <= end && i < 62; i++) { if (cycleOf(isoDate(d)) === month) n++; d.setDate(d.getDate() + 1); }
     });
     return n;
   }
@@ -380,9 +396,9 @@
   function monthFromDate(f, key) {
     if (key === '__init' && f.isNew) {
       const want = f.get('salaryMonth');
-      if (want && want < thisMonth() && monthOf(f.get('date')) !== want) f.set('date', monthEnd(want));
+      if (want && want < cycleOf(today()) && cycleOf(f.get('date')) !== want) { const end = cycleRange(want).to; f.set('date', end < today() ? end : today()); }
     }
-    if (f.get('date')) f.set('salaryMonth', monthOf(f.get('date')));
+    if (f.get('date')) f.set('salaryMonth', cycleOf(f.get('date')));
   }
 
   function salaryFor(emp, month) {
@@ -920,7 +936,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.11';
+  const NEEDED_API = '2026-11-24.13';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -1299,13 +1315,13 @@
     const st = ui('salary');
     if (!st.month) st.month = lastMonth(); // salary being paid now is for last month's work
     const emps = rows('Employees');
-    let h = pageHead('Employees & salary', 'Month-wise: work of October is paid in November — October’s expenses, advances and leaves count in October’s salary',
+    let h = pageHead('Employees & salary', 'Salary month runs ' + (cycleDay() > 1 ? cycleDay() + 'th to ' + (cycleDay() - 1) + 'th — e.g. October = ' + cycleLabel('2026-10').replace(/ 2026/g, '') : '1st to month end') + '. Expenses, advances and leaves in those dates count in that salary.',
       addBtn('Employees', 'Add employee') + (canWrite() ? '<button class="btn" data-act="add" data-t="SalaryAdvances">' + icon('plus') + 'Give advance</button>' : ''));
     h += tabs('salary', [['sheet', 'Salary sheet'], ['employees', 'Employees', emps.length], ['expenses', 'Expenses', rows('EmployeeExpenses').filter((x) => x.salaryMonth === st.month).length], ['advances', 'Advances', rows('SalaryAdvances').filter((x) => st.scope === 'all' || x.salaryMonth === st.month).length], ['history', 'Payment history', rows('SalaryPayments').filter((x) => st.scope === 'all' || x.salaryMonth === st.month).length]], 'sheet');
 
     if (st.tab === 'sheet') {
       const sal = salaryEmployees(st.month).map((e) => Object.assign({ id: e.id }, salaryFor(e, st.month)));
-      h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month">' + csvBtn('salary-sheet') + '</div>';
+      h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month">' + rangeTag(st.month) + csvBtn('salary-sheet') + '</div>';
       h += '<div class="kpis">' +
         kpi('Total payable', inr(sum(sal, 'net')), sal.length + ' employees') +
         kpi('Paid', inr(sum(sal, 'paid')), sal.filter((s) => s.pay).length + ' paid', 'good') +
@@ -1360,7 +1376,7 @@
         if (tab) o.tabs[tab] = true;
       });
       const sumRows = Object.values(per).map((o) => Object.assign(o, { office: o.office || 0, name: empName(o.id), total: o.conv + o.other + (o.office || 0) }));
-      h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month">' + searchFilter('salary', 'Search expenses…') +
+      h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month">' + rangeTag(st.month) + searchFilter('salary', 'Search expenses…') +
         selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + addBtn('EmployeeExpenses', 'Add expense', { salaryMonth: st.month }) + csvBtn('sal-exp') + '</div>';
       h += '<div class="kpis">' + kpi('Total expenses', inr(sum(monthExp, 'amount')), fmtMonth(st.month)) +
         kpi('Conveyance (bike)', inr(sumRows.reduce((a, o) => a + o.conv, 0)), sumRows.reduce((a, o) => a + o.km, 0).toLocaleString('en-IN') + ' km × ' + inr(rate)) +
@@ -1384,7 +1400,7 @@
       ], list_, { actions: (r) => rowActions('EmployeeExpenses', r), name: 'Employee expenses ' + st.month, sort: { k: 'date', dir: 'desc' }, empty: 'No expenses for this month' }) + '</div>';
     } else if (st.tab === 'advances') {
       const adv = rows('SalaryAdvances').filter((a) => (st.scope === 'all' || a.salaryMonth === st.month) && (!st.emp || a.employeeId === st.emp) && matchQ('salary', empName(a.employeeId), a.notes));
-      h += '<div class="filters">' + '<input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month"' + (st.scope === 'all' ? ' disabled' : '') + '>' + selectFilter('salary', 'scope', 'Selected month', [['all', 'All months']]) + searchFilter('salary', 'Search…') + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('advances') + '</div>';
+      h += '<div class="filters">' + '<input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month"' + (st.scope === 'all' ? ' disabled' : '') + '>' + (st.scope === 'all' ? '' : rangeTag(st.month)) + selectFilter('salary', 'scope', 'Selected month', [['all', 'All months']]) + searchFilter('salary', 'Search…') + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('advances') + '</div>';
       h += '<div class="card">' + dataTable('advances', [
         { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },
         { k: 'employee', l: 'Employee', primary: true, v: (r) => empName(r.employeeId), f: (r) => '<b>' + esc(empName(r.employeeId)) + '</b>' + (r.notes ? '<div class="cell-sub">' + esc(r.notes) + '</div>' : '') },
@@ -1394,7 +1410,7 @@
       ], adv, { actions: (r) => rowActions('SalaryAdvances', r), name: 'Advances', sort: { k: 'date', dir: 'desc' }, empty: 'No advances given' }) + '</div>';
     } else {
       const pays = rows('SalaryPayments').filter((r) => (st.scope === 'all' || r.salaryMonth === st.month) && (!st.emp || r.employeeId === st.emp));
-      h += '<div class="filters">' + '<input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month"' + (st.scope === 'all' ? ' disabled' : '') + '>' + selectFilter('salary', 'scope', 'Selected month', [['all', 'All months']]) + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('salary-history') + '</div>';
+      h += '<div class="filters">' + '<input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month"' + (st.scope === 'all' ? ' disabled' : '') + '>' + (st.scope === 'all' ? '' : rangeTag(st.month)) + selectFilter('salary', 'scope', 'Selected month', [['all', 'All months']]) + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('salary-history') + '</div>';
       h += '<div class="card">' + dataTable('salary-history', [
         { k: 'salaryMonth', l: 'Month', f: (r) => esc(fmtMonth(r.salaryMonth)), csv: (r) => r.salaryMonth },
         { k: 'employee', l: 'Employee', primary: true, v: (r) => empName(r.employeeId), f: (r) => '<b>' + esc(empName(r.employeeId)) + '</b>' },
@@ -1430,11 +1446,11 @@
       '<div class="page-actions">' + (canWrite() ? '<button class="btn" data-act="edit" data-t="Employees" data-id="' + esc(e.id) + '">' + icon('edit') + 'Edit</button>' : '') +
       '<button class="btn" data-act="print">' + icon('print') + 'Print</button></div></div></div>';
 
-    h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(month) + '" aria-label="Month">' +
+    h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(month) + '" aria-label="Month">' + rangeTag(month) +
       addBtn('EmployeeExpenses', 'Add expense', { employeeId: e.id, salaryMonth: month }) + addBtn('SalaryAdvances', 'Give advance', { employeeId: e.id, salaryMonth: month }) + '</div>';
 
     const status = !s.pay ? 'Pending' : s.balance > 0.009 ? 'Partial' : 'Paid';
-    h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Salary slip · ' + esc(fmtMonth(month)) + '</h2>' + statusBadge(status) + '</div><div class="card-body"><div class="breakdown">' +
+    h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Salary slip · ' + esc(fmtMonth(month)) + ' <span class="small muted">(' + esc(cycleLabel(month)) + ')</span></h2>' + statusBadge(status) + '</div><div class="card-body"><div class="breakdown">' +
       '<span>Base salary</span><span class="num">' + inr(s.base) + '</span>' +
       '<span>+ Expenses (' + s.exp.length + ')</span><span class="num pos">' + inr(s.expenses) + '</span>' +
       '<span>− Advances (' + s.adv.length + ')</span><span class="num neg">' + inr(s.advances) + '</span>' +
@@ -2374,13 +2390,13 @@
     }
     const s = mySalary(st.month);
     const status = !s.pay ? (st.month >= thisMonth() ? 'Pending' : 'Pending') : s.balance > 0.009 ? 'Partial' : 'Paid';
-    h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Month"></div>';
+    h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Month">' + rangeTag(st.month) + '</div>';
     h += '<div class="kpis">' + kpi('Monthly salary', inr(e.monthlySalary), esc([e.empCode, e.joiningDate && 'Joined ' + fmtDate(e.joiningDate)].filter(Boolean).join(' · '))) +
       kpi('+ Expenses · ' + fmtMonth(st.month), inr(s.expenses), plural(s.exp.length, 'entry').replace('entrys', 'entries'), 'good') +
       kpi('− Advances · ' + fmtMonth(st.month), inr(s.advances), plural(s.adv.length, 'advance'), s.advances ? 'bad' : '') +
       kpi('Net payable', inr(s.net), status === 'Paid' ? 'Paid on ' + fmtDate(s.pay.paidDate) : status === 'Partial' ? 'Balance ' + inr(s.balance) : 'Not paid yet') + '</div>';
 
-    h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Salary slip · ' + esc(fmtMonth(st.month)) + '</h2>' + statusBadge(status) + '</div><div class="card-body"><div class="breakdown">' +
+    h += '<div class="two-col"><div class="card"><div class="card-head"><h2>Salary slip · ' + esc(fmtMonth(st.month)) + ' <span class="small muted">(' + esc(cycleLabel(st.month)) + ')</span></h2>' + statusBadge(status) + '</div><div class="card-body"><div class="breakdown">' +
       '<span>Base salary</span><span class="num">' + inr(s.base) + '</span>' +
       '<span>+ Expenses</span><span class="num pos">' + inr(s.expenses) + '</span>' +
       '<span>− Advances</span><span class="num neg">' + inr(s.advances) + '</span>' +
@@ -3059,7 +3075,7 @@
       const f = (k, l, hint, type) => '<label class="field">' + l + '<input class="input" name="' + k + '"' + (type ? ' type="' + type + '" step="any"' : '') + ' value="' + esc(c[k] === undefined ? '' : c[k]) + '">' + (hint ? '<span class="field-hint">' + hint + '</span>' : '') + '</label>';
       h += '<form id="company-form"><div class="two-col"><div class="card"><div class="card-head"><h2>Company</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:14px">' +
         f('name', 'Company name') + f('website', 'Website') + f('gstNo', 'GST No') + f('address', 'Address (printed on estimates)') + f('serviceArea', 'Service area') +
-        f('logoUrl', 'Logo URL', 'Shown in the app and on estimates') + f('perKmRate', 'Default bike rate per km (₹)', 'Used for employee travel unless the employee has their own rate', 'number') +
+        f('logoUrl', 'Logo URL', 'Shown in the app and on estimates') + f('perKmRate', 'Default bike rate per km (₹)', 'Used for employee travel unless the employee has their own rate', 'number') + f('cycleDay', 'Salary month starts on day', 'e.g. 10 → October salary = 10 Oct to 9 Nov. 1 = calendar month.', 'number') +
         '</div></div><div class="card"><div class="card-head"><h2>Estimates</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:14px">' +
         f('bankName', 'Bank name') + f('bankAccount', 'Account no.') + f('bankIfsc', 'IFSC code') +
         f('estimatePrefix', 'Estimate number prefix', 'Number = prefix + month + day + counter, e.g. RFIUL1101227') + f('estimateValidDays', 'Valid for (days)', '', 'number') +
@@ -3146,7 +3162,7 @@
         try {
           const fd = e.target.elements;
           const company = {};
-          ['name', 'website', 'gstNo', 'address', 'serviceArea', 'logoUrl', 'perKmRate', 'bankName', 'bankAccount', 'bankIfsc', 'estimatePrefix', 'estimateValidDays'].forEach((k) => { company[k] = fd[k].value; });
+          ['name', 'website', 'gstNo', 'address', 'serviceArea', 'logoUrl', 'perKmRate', 'cycleDay', 'bankName', 'bankAccount', 'bankIfsc', 'estimatePrefix', 'estimateValidDays'].forEach((k) => { company[k] = fd[k].value; });
           const r = await api('saveSettings', { settings: { company: company, estimateCounter: fd.estimateCounter.value } });
           S.settings = r.settings;
           toast('Company settings saved');
@@ -3682,7 +3698,7 @@
       ['Saban Jha', 'IT Manager', 'it@urbaneliving.in', 'Admin'],
     ];
     const DEFAULTS = {
-      company: { name: 'Urbane Living', perKmRate: 3, website: 'urbaneliving.in', gstNo: '09AAJFU0647A1ZC', address: 'G-12, Express Green Plaza, Sector-1, Vaishali, Ghaziabad', serviceArea: 'Gurugram, Noida, Delhi, Ghaziabad', logoUrl: '', bankName: '', bankAccount: '', bankIfsc: '', estimatePrefix: 'RFIUL', estimateValidDays: 14 },
+      company: { name: 'Urbane Living', perKmRate: 3, cycleDay: 10, website: 'urbaneliving.in', gstNo: '09AAJFU0647A1ZC', address: 'G-12, Express Green Plaza, Sector-1, Vaishali, Ghaziabad', serviceArea: 'Gurugram, Noida, Delhi, Ghaziabad', logoUrl: '', bankName: '', bankAccount: '', bankIfsc: '', estimatePrefix: 'RFIUL', estimateValidDays: 14 },
       attendance: { ipPrefixes: ['2406:b400:71:93ee'], startTime: '10:00', autoMark: false, geo: { enabled: false, lat: '', lng: '', radius: 200 } },
       estimateCounter: 226,
       estimateTemplate: null,

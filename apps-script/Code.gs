@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.11';
+const API_VERSION = '2026-11-24.13';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -110,7 +110,7 @@ const CHILDREN = {
 
 const DEFAULT_SETTINGS = {
   company: {
-    name: 'Urbane Living', perKmRate: 3, website: 'urbaneliving.in', gstNo: '09AAJFU0647A1ZC',
+    name: 'Urbane Living', perKmRate: 3, cycleDay: 10, website: 'urbaneliving.in', gstNo: '09AAJFU0647A1ZC',
     address: 'G-12, Express Green Plaza, Sector-1, Vaishali, Ghaziabad', serviceArea: 'Gurugram, Noida, Delhi, Ghaziabad',
     logoUrl: '',
     bankName: 'Federal Bank', bankAccount: '21500200007494', bankIfsc: 'FDRL0002150', estimatePrefix: 'RFIUL', estimateValidDays: 14,
@@ -387,7 +387,7 @@ function saveRecord_(user, table, rec, newId) {
   if (!def || !def.editable) throw err_('Invalid table');
   needRole_(user, WRITE_ROLES);
   rec = sanitize_(table, rec || {});
-  if ((table === 'EmployeeExpenses' || table === 'SalaryAdvances') && /^\d{4}-\d{2}-\d{2}$/.test(String(rec.date || ''))) rec.salaryMonth = String(rec.date).slice(0, 7); // month-wise
+  if ((table === 'EmployeeExpenses' || table === 'SalaryAdvances') && /^\d{4}-\d{2}-\d{2}$/.test(String(rec.date || ''))) rec.salaryMonth = cycleOf_(rec.date); // 11th–10th salary month
   (def.required || []).forEach(function (k) {
     if (rec[k] === '' || rec[k] === undefined || rec[k] === null) throw err_('Missing field: ' + k);
   });
@@ -752,6 +752,7 @@ function saveSettings_(user, settings) {
       address: str('address'), serviceArea: str('serviceArea'), logoUrl: str('logoUrl', 500), bankName: str('bankName'),
       bankAccount: str('bankAccount'), bankIfsc: str('bankIfsc'), estimatePrefix: str('estimatePrefix', 12) || 'RFIUL',
       estimateValidDays: Number(c.estimateValidDays) || 14,
+      cycleDay: c.cycleDay === '' || c.cycleDay === undefined ? 10 : Math.min(28, Math.max(0, Math.floor(Number(c.cycleDay) || 0))),
     }]);
   }
   if (settings.attendance) {
@@ -1549,11 +1550,22 @@ function costTypeOf_(t, narr) {
   return 'Other';
 }
 
-// Salary paid in November is for the work of October.
-function workMonthOf_(date) {
-  const d = new Date(date.slice(0, 7) + '-01T00:00:00');
-  d.setDate(0);
+// Salary month starts on the 10th (Settings → Company → cycle day, default 10).
+// "October" = 10 Oct – 9 Nov: expenses and advances in those dates count in
+// October's salary, which is paid after that.
+function cycleDay_() { return Math.min(28, Math.max(0, Number(readSettings_().company.cycleDay))) || 0; }
+function cycleOf_(date) {
+  const d = new Date(String(date).slice(0, 10) + 'T00:00:00');
+  if (isNaN(d)) return String(date).slice(0, 7);
+  if (d.getDate() < cycleDay_()) d.setDate(0); // before the 10th = the month before
   return Utilities.formatDate(d, TZ, 'yyyy-MM');
+}
+// A salary payment is for the month whose cycle ended last (paid on 12 Oct →
+// September; "salary advance" on 5 Nov, near the end of October's cycle → October).
+function workMonthOf_(date) {
+  const d = new Date(String(date).slice(0, 10) + 'T00:00:00');
+  d.setDate(d.getDate() - 20);
+  return cycleOf_(Utilities.formatDate(d, TZ, 'yyyy-MM-dd'));
 }
 
 function salaryMonthOf_(date, cutoff) {
@@ -1588,7 +1600,7 @@ function classifyLine_(line, rules) {
     if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Money in from an employee' });
     let k = rule.action === 'staff' ? null : rule.action;
     if (!k) k = /salary\s*adv|adv(ance)?\.?\s*salary/.test(both) ? 'salary' : /advance|adv\b|imprest/.test(both) ? 'advance' : /salary|salry|full and final|conveyance|kkbk/.test(both) ? 'salary' : rule.fallback;
-    return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: k === 'advance' ? line.date.slice(0, 7) : workMonthOf_(line.date) });
+    return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: k === 'advance' ? cycleOf_(line.date) : workMonthOf_(line.date) });
   }
   if (rule && rule.action === 'site') return Object.assign(base, { kind: dir === 'in' ? 'ignore' : 'site', client: rule.target || 'Unassigned site work', costType: rule.costType || costTypeOf_(both, narr) });
   if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Receipt with no matching client rule' });
@@ -1979,7 +1991,7 @@ function parseExpenseTab_(tab, defaultRate) {
       if (seenAt[dupKey] !== undefined && seenAt[dupKey] !== table) continue;
       seenAt[dupKey] = table;
       line.date = date;
-      line.salaryMonth = date.slice(0, 7); // month-wise: a line counts in the month of its own date
+      line.salaryMonth = cycleOf_(date); // 11th–10th salary month
       lines.push(line);
     }
   });
@@ -2164,7 +2176,7 @@ function syncDayBookRun_(user) {
   return Object.assign(res, { summary: summary });
 }
 
-// Month-wise: an expense or advance always counts in the month of its date.
+// An expense or advance always counts in the salary month (11th–10th) of its date.
 // Entries saved earlier with another month are put right (one write per tab).
 function fixMonths_() {
   let n = 0;
@@ -2176,7 +2188,8 @@ function fixMonths_() {
     const dc = head.indexOf('date'), mc = head.indexOf('salaryMonth');
     if (dc < 0 || mc < 0) return;
     const col = values.slice(1).map(function (r) {
-      const d = r[dc] instanceof Date ? Utilities.formatDate(r[dc], TZ, 'yyyy-MM') : String(r[dc]).slice(0, 7);
+      const ds = r[dc] instanceof Date ? Utilities.formatDate(r[dc], TZ, 'yyyy-MM-dd') : String(r[dc]).slice(0, 10);
+      const d = /^\d{4}-\d{2}-\d{2}$/.test(ds) ? cycleOf_(ds) : '';
       const m = r[mc] instanceof Date ? Utilities.formatDate(r[mc], TZ, 'yyyy-MM') : String(r[mc]).slice(0, 7);
       if (/^\d{4}-\d{2}$/.test(d) && d !== m) { n++; return [d]; }
       return [r[mc] instanceof Date ? m : r[mc]];
