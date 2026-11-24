@@ -264,6 +264,7 @@
         { k: 'rate', l: 'Rate per km (₹)', t: 'money', show: (f) => isKmType(f.get('expenseType')) },
         { k: 'amount', l: 'Amount (₹)', t: 'money', req: true, readonly: (f) => isKmType(f.get('expenseType')) },
         { k: 'salaryMonth', l: 'Add to salary of', t: 'month', req: true, def: thisMonth, hint: 'Amount gets added to this month’s salary' },
+        { k: 'officeCategory', l: 'Bought for the office? Office category', t: 'select', list: 'officeCategories', hint: 'Choose a category if this was bought for the office (milk, stationery…). It then also shows under Office expenses.', show: (f) => !isKmType(f.get('expenseType')) },
         { k: 'notes', l: 'Notes', t: 'textarea', full: true },
       ],
       onChange(f, key) {
@@ -387,6 +388,13 @@
     });
   }
 
+  // Employee expenses that were bought for the office.
+  const officePurchases = () => rows('EmployeeExpenses').filter((x) => x.officeCategory);
+  function officePurchaseStatus(x) {
+    const pay = rows('SalaryPayments').find((p) => p.employeeId === x.employeeId && p.salaryMonth === x.salaryMonth);
+    return pay && num(pay.paidAmount) > 0 ? 'Repaid with ' + fmtMonth(x.salaryMonth) + ' salary' : 'To repay with ' + fmtMonth(x.salaryMonth) + ' salary';
+  }
+
   function cashFlow(p) {
     const f = (t, k) => rows(t).filter((r) => inRange(r[k || 'date'], p));
     const received = sum(f('ClientPayments'), 'amount');
@@ -394,9 +402,15 @@
     const labour = sum(work.filter((w) => w.costType === 'Labour'), 'amount');
     const material = sum(work.filter((w) => w.costType === 'Material'), 'amount');
     const workOther = sum(work, 'amount') - labour - material;
-    const office = sum(f('OfficeExpenses'), 'amount');
     const advances = sum(f('SalaryAdvances'), 'amount');
-    const salary = sum(f('SalaryPayments', 'paidDate'), 'paidAmount');
+    // Office things an employee bought and got back with salary: counted as office, not salary (same total).
+    let officeViaSalary = 0;
+    f('SalaryPayments', 'paidDate').forEach((p) => {
+      const o = sum(officePurchases().filter((x) => x.employeeId === p.employeeId && x.salaryMonth === p.salaryMonth), 'amount');
+      officeViaSalary += Math.min(o, num(p.paidAmount));
+    });
+    const office = sum(f('OfficeExpenses'), 'amount') + officeViaSalary;
+    const salary = sum(f('SalaryPayments', 'paidDate'), 'paidAmount') - officeViaSalary;
     const out = labour + material + workOther + office + advances + salary;
     return { received, labour, material, workOther, office, advances, salary, out, net: received - out };
   }
@@ -861,7 +875,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.2';
+  const NEEDED_API = '2026-11-24.3';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -929,7 +943,7 @@
     const cf = cashFlow(p);
     const clients = rows('Clients').filter((c) => c.status !== 'Cancelled').map((c) => Object.assign({ c: c }, clientStats(c)));
     const dues = sum(clients.filter((x) => x.due > 0), 'due');
-    const m = thisMonth();
+    const m = lastMonth(); // salary due now is for last month's work
     const sal = salaryEmployees(m).map((e) => salaryFor(e, m));
     const salPending = sum(sal.filter((s) => s.balance > 0), 'balance');
     const periodLabel = (PERIODS.find((x) => x[0] === st.period) || [])[1];
@@ -1206,25 +1220,30 @@
   function viewOffice() {
     const st = ui('office');
     const p = periodRange(st);
-    const inPeriod = rows('OfficeExpenses').filter((r) => inRange(r.date, p));
-    const filtered = inPeriod.filter((r) => (!st.category || r.category === st.category) && (!st.mode || r.mode === st.mode) &&
+    // Office things bought by employees with their own money are listed too (paid back with salary).
+    const byEmp = officePurchases().map((x) => ({ id: x.id, _emp: true, date: x.date, category: x.officeCategory, description: x.fromTo || x.notes, paidTo: 'Bought by ' + empName(x.employeeId), mode: officePurchaseStatus(x), amount: x.amount, createdBy: x.createdBy }));
+    const inPeriod = rows('OfficeExpenses').concat(byEmp).filter((r) => inRange(r.date, p));
+    const filtered = inPeriod.filter((r) => (!st.category || r.category === st.category) && (!st.mode || r.mode === st.mode || (st.mode === '__emp' && r._emp)) &&
       matchQ('office', r.category, r.description, r.paidTo, r.billNo, r.notes));
+    const empTotal = sum(inPeriod.filter((r) => r._emp), 'amount');
     const byCat = {};
     inPeriod.forEach((r) => { byCat[r.category] = (byCat[r.category] || 0) + num(r.amount); });
 
     let h = pageHead('Office expenses', 'Rent, electricity, water, tea / coffee and other office spending', csvBtn('office') + addBtn('OfficeExpenses', 'Add expense'));
     h += '<div class="filters">' + periodControls('office') + searchFilter('office', 'Search…') +
-      selectFilter('office', 'category', 'All categories', list('officeCategories')) + selectFilter('office', 'mode', 'All modes', list('paymentModes')) + '</div>';
+      selectFilter('office', 'category', 'All categories', list('officeCategories')) + selectFilter('office', 'mode', 'All modes', [['__emp', 'Bought by employees']].concat(list('paymentModes').map((m) => [m, m]))) + '</div>';
     h += '<div class="chips"><div class="chip"><span class="k">Total</span><span class="v num">' + inr(sum(inPeriod, 'amount')) + '</span></div>' +
+      (empTotal ? '<div class="chip"><span class="k">Bought by employees (repaid with salary)</span><span class="v num">' + inr(empTotal) + '</span></div>' : '') +
       Object.keys(byCat).sort((a, b) => byCat[b] - byCat[a]).map((k) => '<div class="chip"><span class="k">' + esc(k) + '</span><span class="v num">' + inr(byCat[k]) + '</span></div>').join('') + '</div>';
     h += '<div class="card">' + dataTable('office', [
       { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },
       { k: 'category', l: 'Category', primary: true, f: (r) => '<b>' + esc(r.category) + '</b>' + (r.description ? '<div class="cell-sub">' + esc(r.description) + '</div>' : '') },
-      { k: 'paidTo', l: 'Paid to', f: (r) => esc(r.paidTo) + (r.billNo ? '<div class="cell-sub">Bill ' + esc(r.billNo) + '</div>' : '') },
+      { k: 'paidTo', l: 'Paid to', f: (r) => (r._emp ? '<span class="badge">' + esc(r.paidTo) + '</span>' : esc(r.paidTo)) + (r.billNo ? '<div class="cell-sub">Bill ' + esc(r.billNo) + '</div>' : '') },
       { k: 'mode', l: 'Mode', f: (r) => esc(r.mode) },
       { k: 'createdBy', l: 'Added by', f: (r) => esc(userName(r.createdBy)) },
       { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
-    ], filtered, { actions: (r) => rowActions('OfficeExpenses', r), name: 'Office expenses', sort: { k: 'date', dir: 'desc' }, empty: 'No office expenses in this period' }) + '</div>';
+    ], filtered, { actions: (r) => rowActions(r._emp ? 'EmployeeExpenses' : 'OfficeExpenses', r._emp ? byId('EmployeeExpenses', r.id) : r), name: 'Office expenses', sort: { k: 'date', dir: 'desc' }, empty: 'No office expenses in this period' }) + '</div>';
+    if (empTotal) h += '<p class="small muted">“Bought by employees” = things an employee paid for with their own money (Employees &amp; salary → Expenses, with an office category). They are paid back with that month’s salary, so on the Dashboard this money counts as office spending, not salary — nothing is counted twice.</p>';
     return h;
   }
 
@@ -1290,12 +1309,12 @@
       const per = {};
       monthExp.forEach((x) => {
         const o = per[x.employeeId] = per[x.employeeId] || { id: x.employeeId, km: 0, conv: 0, other: 0, n: 0, tabs: {} };
-        if (num(x.km)) { o.km += num(x.km); o.conv += num(x.amount); } else o.other += num(x.amount);
+        if (num(x.km)) { o.km += num(x.km); o.conv += num(x.amount); } else if (x.officeCategory) o.office = (o.office || 0) + num(x.amount); else o.other += num(x.amount);
         o.n++;
         const tab = (String(x.notes || '').match(/From the "([^"]+)" tab/) || [])[1];
         if (tab) o.tabs[tab] = true;
       });
-      const sumRows = Object.values(per).map((o) => Object.assign(o, { name: empName(o.id), total: o.conv + o.other }));
+      const sumRows = Object.values(per).map((o) => Object.assign(o, { office: o.office || 0, name: empName(o.id), total: o.conv + o.other + (o.office || 0) }));
       h += '<div class="filters"><input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month">' + searchFilter('salary', 'Search expenses…') +
         selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + addBtn('EmployeeExpenses', 'Add expense', { salaryMonth: st.month }) + csvBtn('sal-exp') + '</div>';
       h += '<div class="kpis">' + kpi('Total expenses', inr(sum(monthExp, 'amount')), fmtMonth(st.month)) +
@@ -1307,13 +1326,14 @@
         { k: 'name', l: 'Employee', primary: true, f: (o) => '<a href="#/employees/' + encodeURIComponent(o.id) + '"><b>' + esc(o.name) + '</b></a><div class="cell-sub">' + esc(Object.keys(o.tabs).map((t) => 'Sheet: ' + t).join(', ')) + '</div>' },
         { k: 'km', l: 'KM', r: true, total: true, v: (o) => o.km, f: (o) => o.km ? o.km.toLocaleString('en-IN') : '' },
         { k: 'conv', l: 'Conveyance', r: true, total: true, v: (o) => o.conv, f: (o) => o.conv ? inr(o.conv) : '' },
+        { k: 'office', l: 'Bought for office', r: true, total: true, v: (o) => o.office, f: (o) => o.office ? inr(o.office) : '' },
         { k: 'other', l: 'Other expenses', r: true, total: true, v: (o) => o.other, f: (o) => o.other ? inr(o.other) : '' },
         { k: 'total', l: 'Total (added to salary)', r: true, total: true, v: (o) => o.total, f: (o) => '<b>' + inr(o.total) + '</b>' },
       ], sumRows, { name: 'Expenses per employee', sort: { k: 'total', dir: 'desc' }, empty: 'No expenses for this month' }) + '</div>';
       h += '<div class="card">' + dataTable('sal-exp', [
         { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },
         { k: 'employee', l: 'Employee', primary: true, v: (r) => empName(r.employeeId), f: (r) => '<b>' + esc(empName(r.employeeId)) + '</b><div class="cell-sub">' + esc(r.expenseType) + '</div>' },
-        { k: 'details', l: 'Particulars', v: (r) => r.fromTo, f: (r) => esc([r.fromTo, r.clientId && 'Site: ' + clientName(r.clientId)].filter(Boolean).join(' · ')) },
+        { k: 'details', l: 'Particulars', v: (r) => r.fromTo, f: (r) => esc([r.fromTo, r.clientId && 'Site: ' + clientName(r.clientId)].filter(Boolean).join(' · ')) + (r.officeCategory ? ' <span class="badge">Office · ' + esc(r.officeCategory) + '</span>' : '') },
         { k: 'km', l: 'KM × rate', r: true, v: (r) => num(r.km), f: (r) => r.km ? esc(r.km) + ' × ' + inr(r.rate) : '' },
         { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
       ], list_, { actions: (r) => rowActions('EmployeeExpenses', r), name: 'Employee expenses ' + st.month, sort: { k: 'date', dir: 'asc' }, empty: 'No expenses for this month' }) + '</div>';

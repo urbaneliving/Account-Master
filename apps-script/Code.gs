@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.2';
+const API_VERSION = '2026-11-24.3';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -67,7 +67,7 @@ const SCHEMA = {
   },
   EmployeeExpenses: {
     editable: true, prefix: 'EX',
-    fields: 'id date:date employeeId expenseType clientId fromTo km:number rate:number amount:number salaryMonth:month notes ' + META_FIELDS,
+    fields: 'id date:date employeeId expenseType clientId fromTo km:number rate:number amount:number salaryMonth:month officeCategory notes ' + META_FIELDS,
     required: ['date', 'employeeId', 'expenseType', 'amount', 'salaryMonth'],
     refs: { employeeId: 'Employees', clientId: 'Clients' },
   },
@@ -1495,7 +1495,7 @@ function dayBookRules_() {
 }
 
 function linkSummary_(c) {
-  return (c.kind + ' ' + (c.client || c.employee || c.category || c.why || '') + (c.costType ? ' ' + c.costType : '') + (c.salaryMonth ? ' ' + c.salaryMonth : '')).slice(0, 200);
+  return (c.kind + ' ' + (c.client || c.employee || c.category || c.why || '') + (c.costType ? ' ' + c.costType : '') + (c.salaryMonth ? ' ' + c.salaryMonth : '') + (c.officeCategory ? ' office:' + c.officeCategory : '')).slice(0, 200);
 }
 
 function costTypeOf_(t, narr) {
@@ -1785,7 +1785,7 @@ function applyLine_(user, c, ref) {
     return add('OfficeExpenses', { date: c.date, category: c.category, amount: c.amount, mode: c.mode, description: c.desc.slice(0, 300), notes: note });
   }
   if (c.kind === 'advance') return add('SalaryAdvances', { date: c.date, employeeId: ensureNamed_(user, 'Employees', c.employee), amount: c.amount, mode: c.mode, salaryMonth: c.salaryMonth, notes: note + ' ' + c.desc.slice(0, 150) });
-  if (c.kind === 'expense') return add('EmployeeExpenses', { date: c.date, employeeId: c.employeeId, expenseType: c.expenseType, fromTo: c.desc.slice(0, 200), km: c.km || '', rate: c.rate || '', amount: c.amount, salaryMonth: c.salaryMonth, notes: 'From the "' + c.tab + '" tab ' + DAYBOOK_TAG });
+  if (c.kind === 'expense') return add('EmployeeExpenses', { date: c.date, employeeId: c.employeeId, expenseType: c.expenseType, fromTo: c.desc.slice(0, 200), km: c.km || '', rate: c.rate || '', amount: c.amount, salaryMonth: c.salaryMonth, officeCategory: c.officeCategory || '', notes: 'From the "' + c.tab + '" tab ' + DAYBOOK_TAG });
   if (c.kind === 'salary') {
     const empId = ensureNamed_(user, 'Employees', c.employee);
     if (RUN_) {
@@ -1890,7 +1890,21 @@ function parseExpenseTab_(tab, defaultRate) {
   return lines;
 }
 
+// Something an employee bought for the office with their own money → office category ('' = not for the office).
+function officeCategoryOf_(desc, cats) {
+  const t = String(desc || '').toLowerCase();
+  if (/\bsite\b|client|meeting|metting|to office|office to|rapido|repido|auto|cab|metro|bus\b|train|travel|convey/.test(t)) return '';
+  const pick = function (re, name) { return re.test(t) ? (cats.filter(function (c) { return c.toLowerCase() === name.toLowerCase(); })[0] || name) : ''; };
+  return pick(/milk|sugar|coffe|\btea\b|chai|biscu|\bcups?\b|spoon|spon|pantry|snack/, 'Tea / Coffee / Milk / Sugar') ||
+    pick(/water/, 'Water Bottle') ||
+    pick(/stationer|\bpens?\b|\bcopy\b|paper|printing|print out|register|file cover/, 'Stationery') ||
+    pick(/clean|phenyl|broom|harpic|soap/, 'Cleaning') ||
+    pick(/repair|battery|bulb|plumb|electrician/, 'Repair & Maintenance') ||
+    (/for (the )?office|office use|office exp|office purchase/.test(t) ? 'Other' : '');
+}
+
 function expenseLines_(ss, dayBookTab) {
+  const cats = readSettings_().lists.officeCategories || [];
   const rate = Number(readSettings_().company.perKmRate) || 3;
   const out = [];
   expenseTabs_(ss, dayBookTab).forEach(function (t) {
@@ -1900,6 +1914,7 @@ function expenseLines_(ss, dayBookTab) {
       seen[sig] = (seen[sig] || 0) + 1;
       const key = 'XS-' + Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, sig, Utilities.Charset.UTF_8)).replace(/[^A-Za-z0-9]/g, '').slice(0, 12) + '-' + seen[sig];
       out.push(Object.assign(l, {
+        officeCategory: l.km ? '' : officeCategoryOf_(l.desc, cats),
         key: key, kind: 'expense', tab: t.name, employeeId: t.emp.id, employee: t.emp.name,
         expenseType: l.km ? 'Bike Travel (per km)' : /cab|auto|rapido|repido|uber|ola\b/i.test(l.desc) ? 'Auto / Cab' : /coffe|tea|milk|food|snack|biscut|sugar|lunch|chai/i.test(l.desc) ? 'Food' : 'Other',
       }));
