@@ -875,7 +875,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.3';
+  const NEEDED_API = '2026-11-24.4';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -2993,7 +2993,7 @@
     } else if (st.tab === 'members') {
       h += '<div class="filters" style="justify-content:flex-end"><button class="btn primary" data-act="member-add">' + icon('plus') + 'Add member</button></div>';
       h += '<div class="card">' + dataTable('members', [
-        { k: 'name', l: 'Member', primary: true, f: (u) => '<div style="display:flex;gap:10px;align-items:center">' + avatar(u, 30) + '<div><b>' + esc(u.name) + '</b><div class="cell-sub">' + (u.employeeId && byId('Employees', u.employeeId) ? 'Linked employee: ' + esc(byId('Employees', u.employeeId).name) : '') + '</div></div></div>' },
+        { k: 'name', l: 'Member', primary: true, f: (u) => '<div style="display:flex;gap:10px;align-items:center">' + avatar(u, 30) + '<div><b>' + esc(u.name) + '</b><div class="cell-sub">' + (u.linkWarning ? '<span class="neg">⚠ ' + esc(u.linkWarning) + '</span>' : u.linkedEmployee ? 'Sees salary of: ' + esc(u.linkedEmployee) : 'Not linked to an employee') + '</div></div></div>' },
         { k: 'email', l: 'Email', f: (u) => esc(u.email) + (u.phone ? '<div class="cell-sub">' + esc(u.phone) + '</div>' : '') },
         { k: 'role', l: 'Access', v: (u) => u.role + ' ' + (u.designation || ''), f: (u) => accessBadge(u) },
         { k: 'status', l: 'Status', f: (u) => statusBadge(u.status) + (u.mustChange ? '<div class="cell-sub">Must set password</div>' : '') },

@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.3';
+const API_VERSION = '2026-11-24.4';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -369,6 +369,11 @@ function bootstrapRun_(user) {
     attendanceToday: attendanceToday_(user),
     users: users.map(function (u) {
       const p = publicUser_(u);
+      if (user.role === 'Admin') {
+        const le = linkedEmployee_(u, null, users);
+        p.linkedEmployee = le ? le.name : '';
+        p.linkWarning = u.employeeId && !le ? 'The chosen employee has a different name — link ignored' : '';
+      }
       if (user.role !== 'Admin') return { id: p.id, name: p.name, email: p.email, phone: p.phone, designation: p.designation, role: p.role, status: p.status, photo: p.photo };
       return p;
     }),
@@ -599,7 +604,13 @@ function saveUser_(user, rec, password, sendEmail) {
     phone: String(rec.phone || '').trim(), role: rec.role, status: status, updatedBy: user.email, updatedAt: now,
     employeeId: String(rec.employeeId || ''),
   };
-  if (patch.employeeId && !readTable_('Employees').some(function (e) { return e.id === patch.employeeId; })) throw err_('Linked employee not found');
+  if (patch.employeeId) {
+    const le = readTable_('Employees').filter(function (e) { return e.id === patch.employeeId; })[0];
+    if (!le) throw err_('Linked employee not found');
+    if (!sameFirstName_(le.name, patch.name)) throw err_('“' + patch.name + '” cannot be linked to the employee “' + le.name + '” — the names must match, or they would see someone else’s salary');
+    const other = users.filter(function (u) { return u.employeeId === patch.employeeId && u.id !== rec.id; })[0];
+    if (other) throw err_('Employee “' + le.name + '” is already linked to ' + other.name);
+  }
   if (rec.id) {
     if (!users.some(function (u) { return u.id === rec.id; })) throw err_('Member not found');
     if (password) { setPassword_(patch, password); patch.mustChange = 'TRUE'; }
@@ -926,16 +937,34 @@ function setHiddenTabs_(user, tabs) {
 // Self-service: every member sees their own employee record, salary,
 // advances, expenses and payments (linked by member → employee, else email).
 // ---------------------------------------------------------------------------
-function linkedEmployee_(user) {
-  const emps = readTable_('Employees');
+// A member is only ever linked to an employee with the SAME first name, so a
+// wrong link or a wrong email on an employee can never show (or email) one
+// person's salary to someone else.
+function firstName_(name) { return String(name || '').trim().toLowerCase().split(/\s+/)[0] || ''; }
+function sameFirstName_(a, b) { const x = firstName_(a), y = firstName_(b); return !!x && x === y; }
+
+function linkedEmployee_(user, emps, users) {
+  emps = emps || readTable_('Employees');
   if (user.employeeId) {
     const e = emps.filter(function (x) { return x.id === user.employeeId; })[0];
-    if (e) return e;
+    return e && sameFirstName_(e.name, user.name) ? e : null; // explicit link that doesn't match the name is ignored
   }
+  // Employees another member is explicitly linked to are theirs, not this member's.
+  const taken = {};
+  (users || readTable_('Users')).forEach(function (u) { if (u.employeeId && u.id !== user.id) taken[u.employeeId] = true; });
+  const free = emps.filter(function (x) { return !taken[x.id] && sameFirstName_(x.name, user.name); });
   const email = String(user.email).toLowerCase();
-  return emps.filter(function (x) { return x.email && String(x.email).toLowerCase() === email; })[0] ||
-    emps.filter(function (x) { return String(x.name).trim().toLowerCase() === String(user.name).trim().toLowerCase(); })[0] ||
-    byFirstName_(emps, user.name) || null;
+  return free.filter(function (x) { return x.email && String(x.email).toLowerCase() === email; })[0] ||
+    free.filter(function (x) { return String(x.name).trim().toLowerCase() === String(user.name).trim().toLowerCase(); })[0] ||
+    byFirstName_(free, user.name) || null;
+}
+
+// The one member whose own employee record this is (or null when unclear).
+function memberOfEmployee_(employeeId) {
+  const emps = readTable_('Employees');
+  const users = readTable_('Users').filter(function (u) { return u.status === 'Active'; });
+  const hits = users.filter(function (u) { const e = linkedEmployee_(u, emps, users); return e && e.id === employeeId; });
+  return hits.length === 1 ? hits[0] : null;
 }
 
 // "Saban Jha" (login) ↔ "Saban Kumar Jha" (employee): same first name, and only one such employee.
@@ -2092,21 +2121,36 @@ function notify_(event, to, subject, html) {
   }
 }
 
+// Where to email an employee: their own login, else the email on their
+// employee record — but never an address that is another person's login.
 function employeeEmail_(employeeId) {
   const e = readTable_('Employees').filter(function (x) { return x.id === employeeId; })[0];
   if (!e) return '';
-  const u = readTable_('Users').filter(function (x) { return x.employeeId === employeeId || String(x.name).toLowerCase() === String(e.name).toLowerCase(); })[0];
-  return (u && u.email) || e.email || '';
+  const u = memberOfEmployee_(employeeId);
+  if (u) return u.email;
+  const em = String(e.email || '').trim().toLowerCase();
+  if (!em) return '';
+  const owner = readTable_('Users').filter(function (x) { return String(x.email).toLowerCase() === em; })[0];
+  if (owner && !sameFirstName_(owner.name, e.name)) {
+    audit_({ email: 'system' }, 'email blocked', 'Employees', e.id, 'Email on ' + e.name + ' belongs to ' + owner.name + ' — not sent');
+    return '';
+  }
+  return em;
+}
+
+function employeeName_(employeeId) {
+  const e = readTable_('Employees').filter(function (x) { return x.id === employeeId; })[0];
+  return e ? e.name : '';
 }
 
 function notifyRecord_(table, r) {
   if (table === 'SalaryPayments') {
-    notify_('salaryPaid', [employeeEmail_(r.employeeId)], 'Salary paid · ' + r.salaryMonth,
-      '<p>Your salary for <b>' + esc_(r.salaryMonth) + '</b> has been paid: <b>' + inr_(r.paidAmount) + '</b> on ' + esc_(r.paidDate) + (r.mode ? ' by ' + esc_(r.mode) : '') + '.</p>' +
+    notify_('salaryPaid', [employeeEmail_(r.employeeId)], 'Salary paid · ' + employeeName_(r.employeeId) + ' · ' + r.salaryMonth,
+      '<p>Hello ' + esc_(employeeName_(r.employeeId)) + ',</p><p>Your salary for <b>' + esc_(r.salaryMonth) + '</b> has been paid: <b>' + inr_(r.paidAmount) + '</b> on ' + esc_(r.paidDate) + (r.mode ? ' by ' + esc_(r.mode) : '') + '.</p>' +
       '<p>Base ' + inr_(r.baseSalary) + ' + expenses ' + inr_(r.expenses) + ' − advances ' + inr_(r.advances) + (Number(r.deduction) ? ' − deduction ' + inr_(r.deduction) : '') + (Number(r.bonus) ? ' + bonus ' + inr_(r.bonus) : '') + '.</p>');
   } else if (table === 'SalaryAdvances') {
-    notify_('advance', [employeeEmail_(r.employeeId)], 'Advance recorded · ' + inr_(r.amount),
-      '<p>An advance of <b>' + inr_(r.amount) + '</b> given on ' + esc_(r.date) + ' has been recorded. It will be deducted from your salary for <b>' + esc_(r.salaryMonth) + '</b>.</p>');
+    notify_('advance', [employeeEmail_(r.employeeId)], 'Advance recorded · ' + employeeName_(r.employeeId) + ' · ' + inr_(r.amount),
+      '<p>Hello ' + esc_(employeeName_(r.employeeId)) + ',</p><p>An advance of <b>' + inr_(r.amount) + '</b> given on ' + esc_(r.date) + ' has been recorded. It will be deducted from your salary for <b>' + esc_(r.salaryMonth) + '</b>.</p>');
   } else if (table === 'ClientPayments') {
     const c = readTable_('Clients').filter(function (x) { return x.id === r.clientId; })[0] || {};
     notify_('clientPayment', readSettings_().notifications.managers, 'Payment received · ' + inr_(r.amount) + ' · ' + (c.name || ''),
