@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.14';
+const API_VERSION = '2026-11-24.15';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -2044,7 +2044,11 @@ function parseExpenseTab_(tab, defaultRate) {
         if (km && rate && rate <= 20 && km > rate) { line = { desc: text, km: km, rate: rate, amount: cellNum_(e) || Math.round(km * rate) }; c += 4; }
         else if (cellNum_(b)) { line = { desc: text, amount: cellNum_(b) }; c += 2; }
         else if (/^[-\s]*$/.test(String(b)) && /^[-\s]*$/.test(String(d)) && cellNum_(e)) { line = { desc: text, amount: cellNum_(e) }; c += 4; }
-        else {
+        else if (cellNum_(d) > 0 && /\bexp|office|water|milk|tea\b|coffee|stationer|clean/i.test(text) && !/advance|\badv\b|paid|received|salary|total|imprest|cash payment/i.test(text)) {
+          // CR column, but it is something the employee paid for (e.g. "Office Water Exp" in
+          // a tab where Dr = advances taken): the company owes it back → an expense.
+          line = { desc: text, amount: cellNum_(d) }; c += 3;
+        } else {
           // CR only = money given to the employee (an advance if it says so)
           if (/advance|\badv\b/i.test(text) && cellNum_(d) > 0) tabAdv.push({ date: date, amount: cellNum_(d) });
           c += 3; continue;
