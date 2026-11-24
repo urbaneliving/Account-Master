@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.5';
+const API_VERSION = '2026-11-24.6';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -163,7 +163,9 @@ function doPost(e) {
   try {
     return json_(Object.assign({ ok: true }, route_(req)));
   } catch (err) {
-    return json_({ ok: false, error: err.message || String(err), code: err.code || '' });
+    const msg = err.message || String(err);
+    if (/lock timeout|another process was holding the lock/i.test(msg)) return json_({ ok: false, error: 'The dashboard is busy (the Day Book sync is running). Please try again in a minute.', code: 'BUSY' });
+    return json_({ ok: false, error: msg, code: err.code || '' });
   }
 }
 
@@ -1463,6 +1465,7 @@ function mirrorSyncAll_(user) {
 const DAYBOOK_TAG = '[daybook]';
 let SALARY_INFO_ = {};
 let SALARY_MONTHS_ = {};
+let SYNC_BUDGET_MS_ = 240000; // ~4 of the 6 minutes Google allows per run
 
 function cleanRule_(r) {
   const actions = ['ignore', 'client', 'site', 'office', 'staff', 'advance', 'salary'];
@@ -1983,8 +1986,16 @@ function syncDayBookRun_(user) {
   const lock = LockService.getScriptLock();
   lock.waitLock(60000);
   const res = { added: 0, changed: 0, removed: 0, ignored: 0, unchanged: 0, expenses: 0, tabs: [] };
+  // Google stops a run after 6 minutes. Stop taking new lines after ~4 minutes,
+  // save what is done, and let the next run carry on from there.
+  const t0 = Date.now();
+  const BUDGET = SYNC_BUDGET_MS_;
+  const timing = [];
+  const mark = function (what) { timing.push(what + ' ' + Math.round((Date.now() - t0) / 100) / 10 + 's'); };
+  const overBudget = function () { return Date.now() - t0 > BUDGET; };
   try {
     const m = mirrorSheet_(cfg, true);
+    mark('open');
     if (!m.sh) res.noDayBook = true;
     startRun_();
     // A file import of the same Day Book would double everything. Its rows are
@@ -2006,6 +2017,7 @@ function syncDayBookRun_(user) {
     SALARY_INFO_ = readSalarySheet_(m.ss);
     const links = {};
     readTable_('DayBookLinks').forEach(function (l) { links[l.id] = l; });
+    mark('read');
     const seen = {};
     const now = new Date().toISOString();
     const relink = function (id, c, a, h, old) {
@@ -2020,7 +2032,9 @@ function syncDayBookRun_(user) {
       const refVals = last > 1 ? m.sh.getRange(2, m.refCol, last - 1, 2).getValues() : [];
       let refsChanged = false;
       readDayBookLines_(m).forEach(function (l) {
+        if (res.more) return;
         if (l.ref && !/^DB-/.test(l.ref)) return; // written by the dashboard itself
+        if (!(l.ref && links[l.ref]) && overBudget()) { res.more = true; return; }
         const h = lineHash_(l);
         const c = classifyLine_(l, rules);
         if (l.ref && links[l.ref] && !seen[l.ref]) {
@@ -2039,12 +2053,15 @@ function syncDayBookRun_(user) {
         if (c.kind === 'ignore') res.ignored++; else res.added++;
       });
       if (refsChanged) m.sh.getRange(2, m.refCol, refVals.length, 2).setValues(refVals);
+      mark('day book');
     }
     // Everyone in the Salary Sheet becomes an employee (so My account works for all).
     Object.keys(SALARY_INFO_).forEach(function (k) { ensureNamed_(user, 'Employees', SALARY_INFO_[k].name); });
     RUN_.emps = null;
     res.salaryUpdated = applySalarySheet_(user, SALARY_INFO_);
-    if (cfg.expenseTabs !== false) {
+    mark('salary sheet');
+    if (cfg.expenseTabs !== false && !res.more && overBudget()) res.more = true;
+    if (cfg.expenseTabs !== false && !res.more) {
       const tabs = {};
       expenseLines_(m.ss, m.sh ? m.sh.getName() : cfg.tab).forEach(function (l) {
         tabs[l.tab] = (tabs[l.tab] || 0) + 1;
@@ -2057,9 +2074,10 @@ function syncDayBookRun_(user) {
         if (links[l.key]) res.changed++; else res.added++;
       });
       res.tabs = Object.keys(tabs).map(function (t) { return t + ' (' + tabs[t] + ')'; });
+      mark('expense tabs');
     }
     Object.keys(links).forEach(function (id) {
-      if (seen[id]) return;
+      if (seen[id] || res.more) return; // a partial run removes nothing
       if (/^DB-/.test(id) && !m.sh) return; // Day Book tab missing: keep everything
       if (/^XS-/.test(id) && cfg.expenseTabs === false) return;
       revertLink_(user, links[id]);
@@ -2067,11 +2085,13 @@ function syncDayBookRun_(user) {
       res.removed++;
     });
     flushRun_(user);
+    mark('saved');
   } finally {
     RUN_ = null;
     lock.releaseLock();
   }
-  const summary = (res.noDayBook ? 'No "' + cfg.tab + '" tab found. ' : '') + res.added + ' added, ' + res.changed + ' changed, ' + res.removed + ' removed, ' + res.ignored + ' ignored' + (res.expenses ? ', ' + res.expenses + ' employee expense lines read from ' + res.tabs.length + ' tabs' : '') + (res.salaryUpdated ? ', ' + res.salaryUpdated + ' salaries updated from the Salary Sheet' : '') + (res.undoneImport ? ' (old file import ' + res.undoneImport + ' replaced)' : '');
+  res.timing = timing.join(', ');
+  const summary = (res.noDayBook ? 'No "' + cfg.tab + '" tab found. ' : '') + res.added + ' added, ' + res.changed + ' changed, ' + res.removed + ' removed, ' + res.ignored + ' ignored' + (res.expenses ? ', ' + res.expenses + ' employee expense lines read from ' + res.tabs.length + ' tabs' : '') + (res.salaryUpdated ? ', ' + res.salaryUpdated + ' salaries updated from the Salary Sheet' : '') + (res.undoneImport ? ' (old file import ' + res.undoneImport + ' replaced)' : '') + (res.more ? ' — part done, continuing' : '');
   const after = readSettings_();
   const entries = [['mirror', Object.assign(after.mirror, { lastSync: new Date().toISOString(), lastResult: summary, lastError: '' })]];
   if (Object.keys(SALARY_MONTHS_).length) entries.push(['salarySheet', SALARY_MONTHS_]);
@@ -2089,7 +2109,12 @@ function autoSyncDayBook() {
 
 /** Run from the editor to sync now and see the result (or the error) in the Execution log. */
 function runSyncNow() {
-  try { Logger.log('OK: ' + syncDayBook_().summary); } catch (e) { Logger.log('SYNC FAILED: ' + (e && e.stack || e)); }
+  const t = Date.now();
+  try {
+    let r = syncDayBook_();
+    Logger.log('OK: ' + r.summary + ' | time: ' + r.timing);
+    for (let i = 0; r.more && i < 5; i++) { r = syncDayBook_(); Logger.log('OK (next part): ' + r.summary + ' | time: ' + r.timing); }
+  } catch (e) { Logger.log('SYNC FAILED after ' + Math.round((Date.now() - t) / 1000) + 's: ' + (e && e.stack || e)); }
 }
 
 /** Run once from the editor to read the Day Book automatically every 15 minutes. */

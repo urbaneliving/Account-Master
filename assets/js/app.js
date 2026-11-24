@@ -892,7 +892,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.5';
+  const NEEDED_API = '2026-11-24.6';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -2954,7 +2954,12 @@
   }
   async function runDayBookSync(loud) {
     try {
-      const r = await api('dayBookSync');
+      let r = await api('dayBookSync');
+      // A big first sync is done in parts (Google stops a run after 6 minutes).
+      for (let i = 0; r.result.more && i < 6; i++) {
+        if (loud) toast('Day Book: ' + r.result.summary);
+        r = await api('dayBookSync');
+      }
       S.settings.mirror.lastSync = new Date().toISOString();
       S.settings.mirror.lastResult = r.result.summary;
       if (r.result.added || r.result.changed || r.result.removed || r.result.salaryUpdated || r.result.undoneImport) await loadAll();
