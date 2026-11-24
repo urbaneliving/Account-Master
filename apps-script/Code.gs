@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.4';
+const API_VERSION = '2026-11-24.5';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -182,7 +182,7 @@ function route_(req) {
     case 'logout': endSession_(req.token); return {};
     case 'bootstrap': return bootstrap_(user);
     case 'changePassword': return changePassword_(user, req.oldPassword, req.newPassword);
-    case 'save': return saveRecord_(user, req.table, req.record);
+    case 'save': return saveRecord_(user, req.table, req.record, req.newId);
     case 'remove': return removeRecord_(user, req.table, req.id);
     case 'saveUser': return saveUser_(user, req.record, req.password, req.sendEmail);
     case 'resetPassword': return resetPassword_(user, req.id, req.password, req.sendEmail);
@@ -380,7 +380,7 @@ function bootstrapRun_(user) {
   };
 }
 
-function saveRecord_(user, table, rec) {
+function saveRecord_(user, table, rec, newId) {
   const def = SCHEMA[table];
   if (!def || !def.editable) throw err_('Invalid table');
   needRole_(user, WRITE_ROLES);
@@ -412,6 +412,14 @@ function saveRecord_(user, table, rec) {
       }
       if (rowIdx < 0) throw err_('Record not found (it may have been deleted)');
     }
+    // A new record carries an id made by the browser, so a retry after a lost
+    // connection finds the first save instead of adding the entry twice.
+    newId = String(newId || '');
+    if (!rec.id && new RegExp('^' + def.prefix + '-\\d{6}-[A-Z0-9]{6}$').test(newId)) {
+      for (let i = 1; i < values.length; i++) {
+        if (String(values[i][idCol]) === newId) return { record: rowToObj_(headers, values[i], types), repeated: true };
+      }
+    } else newId = '';
 
     if (def.unique) {
       const clash = readTable_(table).some(function (r) {
@@ -421,7 +429,7 @@ function saveRecord_(user, table, rec) {
     }
 
     if (rowIdx < 0) {
-      rec.id = newId_(def.prefix);
+      rec.id = newId || newId_(def.prefix);
       rec.createdBy = user.email;
       rec.createdAt = now;
       if (table === 'Clients' && !rec.clientCode) rec.clientCode = nextCode_(values, headers, 'clientCode', 'UL-C-');

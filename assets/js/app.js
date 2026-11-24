@@ -418,6 +418,14 @@
   // ---------------------------------------------------------------------------
   // API
   // ---------------------------------------------------------------------------
+  const SAFE_RETRY = ['bootstrap', 'save', 'remove', 'removeMany', 'dayBookSync', 'dayBookPreview', 'attendanceList', 'estimatesList', 'estimateGet', 'sheetTabs', 'audit', 'docList', 'leaveList', 'guidesList'];
+  const newRecordId = (table) => {
+    const pre = { Clients: 'CL', ClientWork: 'CW', ClientPayments: 'CP', OfficeExpenses: 'OE', Employees: 'EM', EmployeeExpenses: 'EX', SalaryAdvances: 'AD', SalaryPayments: 'SP' }[table];
+    if (!pre) return '';
+    const d = new Date(); const p2 = (n) => String(n).padStart(2, '0');
+    const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; const rnd = new Uint8Array(6); crypto.getRandomValues(rnd);
+    return pre + '-' + String(d.getFullYear()).slice(2) + p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + Array.from(rnd, (b) => abc[b % 36]).join('');
+  };
   async function api(action, payload) {
     const body = Object.assign({}, payload || {}, { action: action, token: S.token });
     let res;
@@ -426,10 +434,19 @@
     } else {
       if (!CFG.API_URL) throw new Error('API URL is not set in assets/js/config.js');
       let r;
-      try {
-        r = await fetch(CFG.API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
-      } catch (e) {
-        throw new Error('Could not reach the server. Check your internet, and that the Apps Script Web App is deployed with access "Anyone" and its URL is in config.js.');
+      // Google sometimes drops a request. Reads and saves are safe to send again
+      // (a new record carries its own id), so try up to 3 times.
+      const tries = SAFE_RETRY.includes(action) ? 3 : 1;
+      for (let n = 1; ; n++) {
+        try {
+          r = await fetch(CFG.API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+          break;
+        } catch (e) {
+          if (n < tries) { await new Promise((ok) => setTimeout(ok, 1500 * n)); continue; }
+          throw new Error(navigator.onLine === false ? 'You are offline — check the internet and try again.'
+            : 'The server did not answer (Google Apps Script). Please try again in a moment' + (action === 'save' ? ' — if the entry then appears twice, delete one.' : '.') +
+              ' If it keeps failing: Apps Script → Executions shows the reason.');
+        }
       }
       if (!r.ok) throw new Error('Server error (' + r.status + ')');
       res = await r.json();
@@ -477,7 +494,7 @@
   }
 
   async function saveRecord(table, record) {
-    const r = await api('save', { table: table, record: record });
+    const r = await api('save', { table: table, record: record, newId: record.id ? '' : newRecordId(table) });
     const arr = S.data[table] || (S.data[table] = []);
     const i = arr.findIndex((x) => x.id === r.record.id);
     if (i >= 0) arr[i] = r.record; else arr.push(r.record);
@@ -875,7 +892,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.4';
+  const NEEDED_API = '2026-11-24.5';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
