@@ -507,3 +507,7 @@ textarea.ainput { resize: vertical; display: block; }
 .flow .arrows { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; text-align: center; }
 @media (max-width: 640px) { .flow { grid-template-columns: 1fr; } .flow .arrows { flex-direction: row; justify-content: center; flex-wrap: wrap; } }
 #mirror-form label[style*="display:flex"] { display: block !important; line-height: 1.5; }
+
+/* Table pages (20 rows each) */
+.pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--border); }
+.pager .sp { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }

@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.6';
+const API_VERSION = '2026-11-24.9';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -130,7 +130,7 @@ const DEFAULT_SETTINGS = {
   notifications: {
     email: true,
     managers: ['abhishek@urbaneliving.in', 'digvijay@urbaneliving.in'],
-    events: { late: true, leaveRequest: true, leaveDecision: true, salaryPaid: true, advance: true, clientPayment: true, estimateApproved: true },
+    events: { late: true, leaveRequest: true, leaveDecision: true, salaryPaid: true, advance: true, expense: true, clientPayment: true, estimateApproved: true },
   },
   lists: {
     projectTypes: ['Residential', 'Commercial', 'Office', 'Showroom', 'Restaurant', 'Other'],
@@ -452,6 +452,7 @@ function saveRecord_(user, table, rec, newId) {
     if (table === 'Employees' && rec.designation) syncDesignation_(user, '', rec.id, rec.designation);
     audit_(user, rowIdx < 0 ? 'create' : 'update', table, rec.id, summary_(rec));
     if (rowIdx < 0) notifyRecord_(table, rowToObj_(headers, row, types));
+    else if (['SalaryPayments', 'SalaryAdvances', 'EmployeeExpenses'].indexOf(table) >= 0) notifyRecord_(table, rowToObj_(headers, row, types), true);
     mirror_(table, rowToObj_(headers, row, types), 'upsert');
     return { record: rowToObj_(headers, row, types) };
   } finally {
@@ -1585,7 +1586,7 @@ function classifyLine_(line, rules) {
   if (rule && (rule.action === 'staff' || rule.action === 'advance' || rule.action === 'salary')) {
     if (dir === 'in') return Object.assign(base, { kind: 'ignore', why: 'Money in from an employee' });
     let k = rule.action === 'staff' ? null : rule.action;
-    if (!k) k = /advance|adv\b|imprest/.test(both) ? 'advance' : /salary|salry|full and final|conveyance|kkbk/.test(both) ? 'salary' : rule.fallback;
+    if (!k) k = /salary\s*adv|adv(ance)?\.?\s*salary/.test(both) ? 'salary' : /advance|adv\b|imprest/.test(both) ? 'advance' : /salary|salry|full and final|conveyance|kkbk/.test(both) ? 'salary' : rule.fallback;
     return Object.assign(base, { kind: k, employee: rule.target, salaryMonth: k === 'advance' ? line.date.slice(0, 7) : workMonthOf_(line.date) });
   }
   if (rule && rule.action === 'site') return Object.assign(base, { kind: dir === 'in' ? 'ignore' : 'site', client: rule.target || 'Unassigned site work', costType: rule.costType || costTypeOf_(both, narr) });
@@ -1604,7 +1605,7 @@ function readDayBookLines_(m) {
   vals.forEach(function (r, i) {
     const dr = Number(String(r[1]).replace(/[₹,\s]/g, '')) || 0;
     const cr = Number(String(r[2]).replace(/[₹,\s]/g, '')) || 0;
-    let date = r[0] instanceof Date ? Utilities.formatDate(r[0], TZ, 'yyyy-MM-dd') : '';
+    let date = r[0] instanceof Date ? fixSwapped_(Utilities.formatDate(r[0], TZ, 'yyyy-MM-dd'), lastDate) : '';
     if (!date && disp[i][0]) {
       const dm = String(disp[i][0]).match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/);
       if (dm) date = dm[3] + '-' + ('0' + dm[2]).slice(-2) + '-' + ('0' + dm[1]).slice(-2);
@@ -1727,6 +1728,9 @@ function readSalarySheet_(ss) {
     const absCol = head.indexOf('absent');
     const advCol = head.findIndex(function (h) { return /advance/.test(h); });
     const payCol = head.findIndex(function (h) { return /amount pay|net pay|payable/.test(h); });
+    const paidCol = head.findIndex(function (h) { return /salary paid|paid early/.test(h); });
+    const holCol = head.findIndex(function (h) { return /holiday/.test(h); });
+    const reasonCol = head.findIndex(function (h) { return /reason|remark/.test(h); });
     // "Salary sheet for the month of October 2026" just above the header.
     let month = '';
     for (let k = i; k >= Math.max(0, i - 3) && !month; k--) {
@@ -1745,11 +1749,20 @@ function readSalarySheet_(ss) {
         name: name, salary: sal, designation: desCol >= 0 ? String(v[j][desCol] || '').trim() : '',
         joiningDate: joinCol >= 0 && v[j][joinCol] instanceof Date ? Utilities.formatDate(v[j][joinCol], TZ, 'yyyy-MM-dd') : '',
         absent: absCol >= 0 ? Number(v[j][absCol]) || 0 : 0,
+        holiday: holCol >= 0 ? Number(v[j][holCol]) || 0 : 0,
         advance: advCol >= 0 ? Number(v[j][advCol]) || 0 : 0,
-        pay: payCol >= 0 && v[j][payCol] !== '' ? Number(v[j][payCol]) || 0 : null,
+        pay: payCol >= 0 && typeof v[j][payCol] === 'number' ? v[j][payCol] : null, // "T.B.D" = not decided
+        paidEarly: paidCol >= 0 ? Number(v[j][paidCol]) || 0 : 0,
+        reason: reasonCol >= 0 ? String(v[j][reasonCol] || '').trim().slice(0, 200) : '',
       };
     }
-    if (month && Object.keys(block).length) SALARY_MONTHS_[month] = block;
+    if (month && Object.keys(block).length) {
+      const prev = SALARY_MONTHS_[month];
+      if (prev && paidCol >= 0) {
+        // payment-status block: keep the attendance block, add what was paid early
+        Object.keys(block).forEach(function (k) { if (prev[k]) prev[k].paidEarly = block[k].paidEarly; else prev[k] = block[k]; });
+      } else SALARY_MONTHS_[month] = block;
+    }
     if (Object.keys(block).length) out = block; // keep the last (latest month) block
   }
   return out;
@@ -1864,8 +1877,25 @@ function applyLine_(user, c, ref) {
 // ---------------------------------------------------------------------------
 const EXPENSE_TAB_SKIP = /\bsir\b|daily work|details|office exp|^sheet\s*\d*$|salary sheet|day ?book/i;
 
-function cellDate_(v) {
-  if (v instanceof Date) return isNaN(v) ? '' : Utilities.formatDate(v, TZ, 'yyyy-MM-dd');
+// A sheet set to US format saves a typed "06-11-2026" (6 Nov) as 11 June.
+// When a real date cell has day ≤ 12 and the day/month-swapped date fits the
+// lines around it far better (or the date is in the future), use the swap.
+function fixSwapped_(date, near, far, close) {
+  const m = String(date).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m || Number(m[3]) > 12 || m[2] === m[3]) return date;
+  const swapped = m[1] + '-' + m[3] + '-' + m[2];
+  const day = 86400000;
+  const t = function (x) { return new Date(x + 'T00:00:00').getTime(); };
+  const today = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
+  if (date > today && swapped <= today) return swapped;
+  if (!near) return date;
+  const a = Math.abs(t(date) - t(near)), b = Math.abs(t(swapped) - t(near));
+  if (far) return a > far * day && b < close * day && swapped <= today ? swapped : date;
+  return a > 25 * day && b < a / 2 && swapped <= today ? swapped : date;
+}
+
+function cellDate_(v, near) {
+  if (v instanceof Date) return isNaN(v) ? '' : fixSwapped_(Utilities.formatDate(v, TZ, 'yyyy-MM-dd'), near, 40, 30);
   const m = String(v || '').trim().match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})$/);
   if (!m) return '';
   const y = m[3].length === 2 ? '20' + m[3] : m[3];
@@ -1900,10 +1930,25 @@ function parseExpenseTab_(tab, defaultRate) {
   if (last < 2) return [];
   const v = sh.getRange(1, 1, last, width).getValues();
   const lines = [];
+  // The middle of the dates that cannot be misread (day > 12, or typed as text)
+  // tells which month this tab is about; it is used to spot swapped day/month.
+  const sure = [];
   v.forEach(function (row) {
+    row.forEach(function (x) {
+      if (x instanceof Date && !isNaN(x) && x.getDate() > 12) sure.push(Utilities.formatDate(x, TZ, 'yyyy-MM-dd'));
+      else if (!(x instanceof Date) && cellDate_(x)) sure.push(cellDate_(x));
+    });
+  });
+  sure.sort();
+  const anchor = sure.length ? sure[Math.floor(sure.length / 2)] : '';
+  const seenAt = {};
+  const tableAt = {};
+  v.forEach(function (row, ri) {
+    row.forEach(function (x, ci) { if (String(x).trim().toLowerCase() === 'date') tableAt[ci] = ri; });
     for (let c = 0; c < row.length; c++) {
-      const date = cellDate_(row[c]);
+      const date = cellDate_(row[c], anchor);
       if (!date) continue;
+      const startCol = c;
       const a = row[c + 1], b = row[c + 2], d = row[c + 3], e = row[c + 4];
       let line = null;
       if (isText_(a)) {
@@ -1911,6 +1956,7 @@ function parseExpenseTab_(tab, defaultRate) {
         const km = cellNum_(b), rate = cellNum_(d);
         if (km && rate && rate <= 20 && km > rate) { line = { desc: text, km: km, rate: rate, amount: cellNum_(e) || Math.round(km * rate) }; c += 4; }
         else if (cellNum_(b)) { line = { desc: text, amount: cellNum_(b) }; c += 2; }
+        else if (/^[-\s]*$/.test(String(b)) && /^[-\s]*$/.test(String(d)) && cellNum_(e)) { line = { desc: text, amount: cellNum_(e) }; c += 4; }
         else { c += 3; continue; } // CR only (money given to the employee) or no amount
         if (/advance|\badv\b|salary|total|imprest|^paid$|^done$/i.test(text)) continue;
       } else if (cellNum_(a)) {
@@ -1922,6 +1968,12 @@ function parseExpenseTab_(tab, defaultRate) {
         c += where ? 4 : 3;
       }
       if (!line || !(line.amount > 0)) continue;
+      // The same line copied into a second table of the tab (e.g. a conveyance
+      // summary next to the expense list) is counted once.
+      const dupKey = date + '|' + line.amount + '|' + (line.km || '');
+      const table = startCol + ':' + (tableAt[startCol] === undefined ? '-' : tableAt[startCol]);
+      if (seenAt[dupKey] !== undefined && seenAt[dupKey] !== table) continue;
+      seenAt[dupKey] = table;
       line.date = date;
       line.salaryMonth = date.slice(0, 7); // month-wise: a line counts in the month of its own date
       lines.push(line);
@@ -2176,13 +2228,21 @@ function employeeName_(employeeId) {
   return e ? e.name : '';
 }
 
-function notifyRecord_(table, r) {
+// Records about one employee are emailed to that employee only (never to others).
+function notifyRecord_(table, r, updated) {
+  const upd = updated ? ' (updated)' : '';
+  if (table === 'EmployeeExpenses') {
+    notify_('expense', [employeeEmail_(r.employeeId)], 'Expense ' + (updated ? 'updated' : 'added') + ' · ' + employeeName_(r.employeeId) + ' · ' + inr_(r.amount),
+      '<p>Hello ' + esc_(employeeName_(r.employeeId)) + ',</p><p>Your expense of <b>' + inr_(r.amount) + '</b> on ' + esc_(r.date) + ' (' + esc_(r.expenseType) + (r.fromTo ? ' — ' + esc_(r.fromTo) : '') + ') has been ' + (updated ? 'updated' : 'recorded') +
+      '. It will be added to your salary for <b>' + esc_(r.salaryMonth) + '</b>.</p>');
+    return;
+  }
   if (table === 'SalaryPayments') {
-    notify_('salaryPaid', [employeeEmail_(r.employeeId)], 'Salary paid · ' + employeeName_(r.employeeId) + ' · ' + r.salaryMonth,
+    notify_('salaryPaid', [employeeEmail_(r.employeeId)], 'Salary paid' + upd + ' · ' + employeeName_(r.employeeId) + ' · ' + r.salaryMonth,
       '<p>Hello ' + esc_(employeeName_(r.employeeId)) + ',</p><p>Your salary for <b>' + esc_(r.salaryMonth) + '</b> has been paid: <b>' + inr_(r.paidAmount) + '</b> on ' + esc_(r.paidDate) + (r.mode ? ' by ' + esc_(r.mode) : '') + '.</p>' +
       '<p>Base ' + inr_(r.baseSalary) + ' + expenses ' + inr_(r.expenses) + ' − advances ' + inr_(r.advances) + (Number(r.deduction) ? ' − deduction ' + inr_(r.deduction) : '') + (Number(r.bonus) ? ' + bonus ' + inr_(r.bonus) : '') + '.</p>');
   } else if (table === 'SalaryAdvances') {
-    notify_('advance', [employeeEmail_(r.employeeId)], 'Advance recorded · ' + employeeName_(r.employeeId) + ' · ' + inr_(r.amount),
+    notify_('advance', [employeeEmail_(r.employeeId)], 'Advance recorded' + upd + ' · ' + employeeName_(r.employeeId) + ' · ' + inr_(r.amount),
       '<p>Hello ' + esc_(employeeName_(r.employeeId)) + ',</p><p>An advance of <b>' + inr_(r.amount) + '</b> given on ' + esc_(r.date) + ' has been recorded. It will be deducted from your salary for <b>' + esc_(r.salaryMonth) + '</b>.</p>');
   } else if (table === 'ClientPayments') {
     const c = readTable_('Clients').filter(function (x) { return x.id === r.clientId; })[0] || {};

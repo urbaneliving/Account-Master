@@ -117,7 +117,7 @@
   // ---------------------------------------------------------------------------
   const PERIODS = [
     ['this-month', 'This month'], ['last-month', 'Last month'], ['last-3', 'Last 3 months'],
-    ['this-fy', 'This financial year'], ['last-fy', 'Last financial year'], ['all', 'All time'], ['custom', 'Custom range'],
+    ['month', 'Choose month…'], ['this-fy', 'This financial year'], ['last-fy', 'Last financial year'], ['all', 'All time'], ['custom', 'Custom range'],
   ];
 
   function periodRange(st) {
@@ -131,6 +131,7 @@
       case 'last-3': return { from: addMonths(m, -2) + '-01', to: monthEnd(m) };
       case 'this-fy': return { from: fyStart + '-04-01', to: (fyStart + 1) + '-03-31' };
       case 'last-fy': return { from: (fyStart - 1) + '-04-01', to: fyStart + '-03-31' };
+      case 'month': { const pm = st.pmonth || m; return { from: pm + '-01', to: monthEnd(pm) }; }
       case 'custom': return { from: st.from || '', to: st.to || '' };
       default: return { from: '', to: '' };
     }
@@ -141,6 +142,7 @@
     if (!st.period) st.period = def || 'this-month';
     let h = '<select class="input" data-filter="period" aria-label="Period">' +
       PERIODS.map((p) => '<option value="' + p[0] + '"' + (st.period === p[0] ? ' selected' : '') + '>' + p[1] + '</option>').join('') + '</select>';
+    if (st.period === 'month') h += '<input class="input" type="month" data-filter="pmonth" value="' + esc(st.pmonth || thisMonth()) + '" aria-label="Month">';
     if (st.period === 'custom') {
       h += '<input class="input" type="date" data-filter="from" value="' + esc(st.from || '') + '" aria-label="From date">' +
         '<input class="input" type="date" data-filter="to" value="' + esc(st.to || '') + '" aria-label="To date">';
@@ -509,6 +511,7 @@
   // ---------------------------------------------------------------------------
   // Generic table
   // ---------------------------------------------------------------------------
+  const PAGE_SIZE = 20;
   function dataTable(id, cols, data, opts) {
     opts = opts || {};
     const sort = (S.ui.sort || {})[id] || opts.sort;
@@ -528,6 +531,12 @@
     S.tables[id] = { cols: cols, rows: list, name: opts.name || id };
 
     if (!list.length) return '<div class="empty">' + esc(opts.empty || 'No records yet') + '</div>';
+    // 20 rows per page; totals and CSV export still use every row.
+    const size = opts.pageSize || PAGE_SIZE;
+    const pages = Math.max(1, Math.ceil(list.length / size));
+    S.ui.pg = S.ui.pg || {};
+    const pg = Math.min(Math.max(1, S.ui.pg[id] || 1), pages);
+    const shown = list.slice((pg - 1) * size, pg * size);
 
     const actions = opts.actions && canWrite();
     let h = '<div class="table-wrap"><table class="data cards"><thead><tr>';
@@ -537,7 +546,7 @@
     });
     if (actions) h += '<th class="actions"></th>';
     h += '</tr></thead><tbody>';
-    list.forEach((r) => {
+    shown.forEach((r) => {
       const click = opts.onRow ? ' class="clickable" data-act="' + opts.onRow + '" data-id="' + esc(r.id) + '"' : '';
       h += '<tr' + click + '>';
       cols.forEach((c) => {
@@ -555,14 +564,22 @@
       h += '<tfoot><tr>';
       cols.forEach((c, i) => {
         let v = '';
-        if (c.total) v = inr(sum(list, c.v || c.k));
+        if (c.total) v = c.plain ? String(sum(list, c.v || c.k)) : inr(sum(list, c.v || c.k));
         else if (i === 0) v = 'Total (' + list.length + ')';
         h += '<td class="' + (c.r ? 'r num' : '') + '" data-label="' + esc(c.l) + '">' + v + '</td>';
       });
       if (actions) h += '<td class="actions"></td>';
       h += '</tr></tfoot>';
     }
-    return h + '</table></div>';
+    h += '</table></div>';
+    if (pages > 1) {
+      const btn = (p, label, dis) => '<button class="btn sm' + (p === pg ? ' primary' : '') + '" data-act="page" data-id="' + id + '" data-p="' + p + '"' + (dis ? ' disabled' : '') + '>' + label + '</button>';
+      const nums = [];
+      for (let p = 1; p <= pages; p++) if (p === 1 || p === pages || Math.abs(p - pg) <= 1) nums.push(p); else if (nums[nums.length - 1] !== '…') nums.push('…');
+      h += '<div class="pager"><span class="small muted">' + ((pg - 1) * size + 1) + '–' + Math.min(pg * size, list.length) + ' of ' + list.length + '</span><div class="sp">' +
+        btn(pg - 1, '‹ Prev', pg === 1) + nums.map((p) => (p === '…' ? '<span class="muted">…</span>' : btn(p, String(p)))).join('') + btn(pg + 1, 'Next ›', pg === pages) + '</div></div>';
+    }
+    return h;
   }
 
   function rowActions(table, r) {
@@ -892,7 +909,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.6';
+  const NEEDED_API = '2026-11-24.9';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -1273,7 +1290,7 @@
     const emps = rows('Employees');
     let h = pageHead('Employees & salary', 'Month-wise: work of October is paid in November — October’s expenses, advances and leaves count in October’s salary',
       addBtn('Employees', 'Add employee') + (canWrite() ? '<button class="btn" data-act="add" data-t="SalaryAdvances">' + icon('plus') + 'Give advance</button>' : ''));
-    h += tabs('salary', [['sheet', 'Salary sheet'], ['employees', 'Employees', emps.length], ['expenses', 'Expenses', rows('EmployeeExpenses').filter((x) => x.salaryMonth === st.month).length], ['advances', 'Advances', rows('SalaryAdvances').length], ['history', 'Payment history', rows('SalaryPayments').length]], 'sheet');
+    h += tabs('salary', [['sheet', 'Salary sheet'], ['employees', 'Employees', emps.length], ['expenses', 'Expenses', rows('EmployeeExpenses').filter((x) => x.salaryMonth === st.month).length], ['advances', 'Advances', rows('SalaryAdvances').filter((x) => st.scope === 'all' || x.salaryMonth === st.month).length], ['history', 'Payment history', rows('SalaryPayments').filter((x) => st.scope === 'all' || x.salaryMonth === st.month).length]], 'sheet');
 
     if (st.tab === 'sheet') {
       const sal = salaryEmployees(st.month).map((e) => Object.assign({ id: e.id }, salaryFor(e, st.month)));
@@ -1288,7 +1305,7 @@
         { k: 'base', l: 'Base', r: true, total: true, v: (s) => s.base, f: (s) => inr(s.base) },
         { k: 'expenses', l: '+ Expenses', r: true, total: true, v: (s) => s.expenses, f: (s) => s.expenses ? '<span class="pos">' + inr(s.expenses) + '</span>' : '' },
         { k: 'advances', l: '− Advances', r: true, total: true, v: (s) => s.advances, f: (s) => s.advances ? '<span class="neg">' + inr(s.advances) + '</span>' : '' },
-        { k: 'leave', l: 'Leave days', r: true, total: true, v: (s) => s.absentDays, f: (s) => s.absentDays ? esc(s.absentDays) : '' },
+        { k: 'leave', l: 'Leave days', r: true, total: true, plain: true, v: (s) => s.absentDays, f: (s) => s.absentDays ? esc(s.absentDays) : '' },
         { k: 'adj', l: '± Leave / other', r: true, v: (s) => s.bonus - s.deduction, f: (s) => s.bonus - s.deduction ? inr(s.bonus - s.deduction) : '' },
         { k: 'net', l: 'Net payable', r: true, total: true, v: (s) => s.net, f: (s) => '<b>' + inr(s.net) + '</b>' },
         { k: 'paid', l: 'Paid', r: true, total: true, v: (s) => s.paid, f: (s) => s.pay ? inr(s.paid) + '<div class="cell-sub">' + esc(fmtDate(s.pay.paidDate)) + '</div>' : '' },
@@ -1341,7 +1358,7 @@
       h += '<p class="small muted" style="margin:0 0 10px">Expenses are added to the salary of their month. Lines written in each employee’s own tab of the Google Sheet (e.g. “Divya Singh”, “Archit Conve Sheet”) come here automatically: Date · Particulars · Dr amount, or Date · KM · Rate for conveyance. Advances and salary in those tabs are skipped — they come from the Day Book.</p>';
       h += '<div class="card" style="margin-bottom:16px"><div class="card-head"><h2>Per employee · ' + esc(fmtMonth(st.month)) + '</h2></div>' + dataTable('sal-exp-sum', [
         { k: 'name', l: 'Employee', primary: true, f: (o) => '<a href="#/employees/' + encodeURIComponent(o.id) + '"><b>' + esc(o.name) + '</b></a><div class="cell-sub">' + esc(Object.keys(o.tabs).map((t) => 'Sheet: ' + t).join(', ')) + '</div>' },
-        { k: 'km', l: 'KM', r: true, total: true, v: (o) => o.km, f: (o) => o.km ? o.km.toLocaleString('en-IN') : '' },
+        { k: 'km', l: 'KM', r: true, total: true, plain: true, v: (o) => o.km, f: (o) => o.km ? o.km.toLocaleString('en-IN') : '' },
         { k: 'conv', l: 'Conveyance', r: true, total: true, v: (o) => o.conv, f: (o) => o.conv ? inr(o.conv) : '' },
         { k: 'office', l: 'Bought for office', r: true, total: true, v: (o) => o.office, f: (o) => o.office ? inr(o.office) : '' },
         { k: 'other', l: 'Other expenses', r: true, total: true, v: (o) => o.other, f: (o) => o.other ? inr(o.other) : '' },
@@ -1353,10 +1370,10 @@
         { k: 'details', l: 'Particulars', v: (r) => r.fromTo, f: (r) => esc([r.fromTo, r.clientId && 'Site: ' + clientName(r.clientId)].filter(Boolean).join(' · ')) + (r.officeCategory ? ' <span class="badge">Office · ' + esc(r.officeCategory) + '</span>' : '') },
         { k: 'km', l: 'KM × rate', r: true, v: (r) => num(r.km), f: (r) => r.km ? esc(r.km) + ' × ' + inr(r.rate) : '' },
         { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
-      ], list_, { actions: (r) => rowActions('EmployeeExpenses', r), name: 'Employee expenses ' + st.month, sort: { k: 'date', dir: 'asc' }, empty: 'No expenses for this month' }) + '</div>';
+      ], list_, { actions: (r) => rowActions('EmployeeExpenses', r), name: 'Employee expenses ' + st.month, sort: { k: 'date', dir: 'desc' }, empty: 'No expenses for this month' }) + '</div>';
     } else if (st.tab === 'advances') {
-      const adv = rows('SalaryAdvances').filter((a) => (!st.emp || a.employeeId === st.emp) && matchQ('salary', empName(a.employeeId), a.notes));
-      h += '<div class="filters">' + searchFilter('salary', 'Search…') + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('advances') + '</div>';
+      const adv = rows('SalaryAdvances').filter((a) => (st.scope === 'all' || a.salaryMonth === st.month) && (!st.emp || a.employeeId === st.emp) && matchQ('salary', empName(a.employeeId), a.notes));
+      h += '<div class="filters">' + '<input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month"' + (st.scope === 'all' ? ' disabled' : '') + '>' + selectFilter('salary', 'scope', 'Selected month', [['all', 'All months']]) + searchFilter('salary', 'Search…') + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('advances') + '</div>';
       h += '<div class="card">' + dataTable('advances', [
         { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },
         { k: 'employee', l: 'Employee', primary: true, v: (r) => empName(r.employeeId), f: (r) => '<b>' + esc(empName(r.employeeId)) + '</b>' + (r.notes ? '<div class="cell-sub">' + esc(r.notes) + '</div>' : '') },
@@ -1365,8 +1382,8 @@
         { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
       ], adv, { actions: (r) => rowActions('SalaryAdvances', r), name: 'Advances', sort: { k: 'date', dir: 'desc' }, empty: 'No advances given' }) + '</div>';
     } else {
-      const pays = rows('SalaryPayments').filter((r) => (!st.emp || r.employeeId === st.emp));
-      h += '<div class="filters">' + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('salary-history') + '</div>';
+      const pays = rows('SalaryPayments').filter((r) => (st.scope === 'all' || r.salaryMonth === st.month) && (!st.emp || r.employeeId === st.emp));
+      h += '<div class="filters">' + '<input class="input" type="month" data-filter="month" value="' + esc(st.month) + '" aria-label="Salary month"' + (st.scope === 'all' ? ' disabled' : '') + '>' + selectFilter('salary', 'scope', 'Selected month', [['all', 'All months']]) + selectFilter('salary', 'emp', 'All employees', emps.map((e) => [e.id, e.name])) + csvBtn('salary-history') + '</div>';
       h += '<div class="card">' + dataTable('salary-history', [
         { k: 'salaryMonth', l: 'Month', f: (r) => esc(fmtMonth(r.salaryMonth)), csv: (r) => r.salaryMonth },
         { k: 'employee', l: 'Employee', primary: true, v: (r) => empName(r.employeeId), f: (r) => '<b>' + esc(empName(r.employeeId)) + '</b>' },
@@ -1436,13 +1453,13 @@
       { k: 'expenseType', l: 'Expense', primary: true, f: (r) => '<b>' + esc(r.expenseType) + '</b><div class="cell-sub">' + esc([r.fromTo, r.clientId && clientName(r.clientId), r.notes].filter(Boolean).join(' · ')) + '</div>' },
       { k: 'km', l: 'Km × rate', r: true, f: (r) => r.km ? esc(r.km) + ' km × ' + inr(r.rate) : '' },
       { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
-    ], s.exp, { actions: (r) => rowActions('EmployeeExpenses', r), sort: { k: 'date', dir: 'asc' }, empty: 'No expenses this month' }) + '</div>';
+    ], s.exp, { actions: (r) => rowActions('EmployeeExpenses', r), sort: { k: 'date', dir: 'desc' }, empty: 'No expenses this month' }) + '</div>';
     h += '<h2 style="margin:8px 0 10px">Advances · ' + esc(fmtMonth(month)) + '</h2>';
     h += '<div class="card">' + dataTable('emp-adv', [
       { k: 'date', l: 'Date', primary: true, f: (r) => esc(fmtDate(r.date)) },
       { k: 'mode', l: 'Mode', f: (r) => esc(r.mode) + (r.notes ? '<div class="cell-sub">' + esc(r.notes) + '</div>' : '') },
       { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
-    ], s.adv, { actions: (r) => rowActions('SalaryAdvances', r), sort: { k: 'date', dir: 'asc' }, empty: 'No advances this month' }) + '</div>';
+    ], s.adv, { actions: (r) => rowActions('SalaryAdvances', r), sort: { k: 'date', dir: 'desc' }, empty: 'No advances this month' }) + '</div>';
     return h;
   }
 
@@ -2378,7 +2395,7 @@
       { k: 'expenseType', l: 'Expense', primary: true, f: (r) => '<b>' + esc(r.expenseType) + '</b>' + (r.fromTo ? '<div class="cell-sub">' + esc(r.fromTo) + '</div>' : '') },
       { k: 'km', l: 'Km × rate', r: true, f: (r) => (r.km ? esc(r.km) + ' km × ' + inr(r.rate) : '') },
       { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
-    ], s.exp, { sort: { k: 'date', dir: 'asc' }, empty: 'No expenses added for this month' }) + '</div>';
+    ], s.exp, { sort: { k: 'date', dir: 'desc' }, empty: 'No expenses added for this month' }) + '</div>';
     h += '<h2 style="margin:8px 0 10px">My advances</h2><div class="card">' + dataTable('me-adv', [
       { k: 'date', l: 'Date', primary: true, f: (r) => esc(fmtDate(r.date)) },
       { k: 'salaryMonth', l: 'Deducted from', f: (r) => esc(fmtMonth(r.salaryMonth)) },
@@ -3045,8 +3062,9 @@
         ['late', 'Late check-in reminder', 'to the employee who came late'],
         ['leaveRequest', 'New leave request', 'to the approvers'],
         ['leaveDecision', 'Leave approved / rejected', 'to the employee'],
-        ['salaryPaid', 'Salary paid', 'to the employee, with the breakdown'],
-        ['advance', 'Advance recorded', 'to the employee'],
+        ['salaryPaid', 'Salary paid', 'to that employee only, with the breakdown'],
+        ['advance', 'Advance recorded', 'to that employee only'],
+        ['expense', 'Expense added for an employee', 'to that employee only'],
         ['clientPayment', 'Payment received from a client', 'to the managers below'],
         ['estimateApproved', 'Estimate approved', 'to the managers below and whoever made it'],
       ];
@@ -3287,7 +3305,15 @@
         try { await loadAll(); toast('Data refreshed'); renderPage(); } catch (err) { toast(err.message, true); }
         break;
       case 'tab': ui(el.dataset.page).tab = el.dataset.tab; renderPage(); break;
+      case 'page': {
+        S.ui.pg = S.ui.pg || {};
+        S.ui.pg[el.dataset.id] = Number(el.dataset.p) || 1;
+        renderPage();
+        const t = $('#page .pager'); if (t) t.closest('.card, #page').scrollIntoView({ block: 'start' });
+        break;
+      }
       case 'sort': {
+        S.ui.pg = {};
         S.ui.sort = S.ui.sort || {};
         const cur = S.ui.sort[el.dataset.id];
         S.ui.sort[el.dataset.id] = { k: el.dataset.k, dir: cur && cur.k === el.dataset.k && cur.dir === 'asc' ? 'desc' : 'asc' };
@@ -3542,6 +3568,7 @@
     if (!el) return;
     const page = route().page === 'clients' && route().id ? 'client' : route().page === 'employees' ? 'employee' : route().page;
     ui(page)[el.dataset.filter] = el.value;
+    S.ui.pg = {}; // a new filter starts at page 1
     if (el.type === 'search' && e.type === 'change') return;
     renderPage();
   }
