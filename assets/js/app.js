@@ -224,6 +224,7 @@
         { k: 'amount', l: 'Amount (₹)', t: 'money', req: true, hint: 'Auto = quantity × rate' },
         { k: 'vendorPaid', l: 'Paid to vendor?', t: 'select', opts: ['Paid', 'Unpaid'], def: () => 'Paid' },
         { k: 'notes', l: 'Notes', t: 'textarea', full: true },
+        { k: 'billFile', l: 'Bill / receipt photo (optional)', t: 'file', full: true },
       ],
       onChange(f, key) {
         if ((key === 'qty' || key === 'rate') && f.get('qty') !== '' && f.get('rate') !== '') {
@@ -253,6 +254,7 @@
         { k: 'paidTo', l: 'Paid to', t: 'text' },
         { k: 'billNo', l: 'Bill no.', t: 'text' },
         { k: 'notes', l: 'Notes', t: 'textarea', full: true },
+        { k: 'billFile', l: 'Bill / receipt photo (optional)', t: 'file', full: true },
       ],
     },
     Employees: {
@@ -284,6 +286,7 @@
         { k: 'salaryMonth', l: 'Added to salary of', t: 'month', req: true, def: thisMonth, readonly: () => true, hint: 'Always the month of the date (month-wise)' },
         { k: 'officeCategory', l: 'Bought for the office? Office category', t: 'select', list: 'officeCategories', hint: 'Choose a category if this was bought for the office (milk, stationery…). It then also shows under Office expenses.', show: (f) => !isKmType(f.get('expenseType')) },
         { k: 'notes', l: 'Notes', t: 'textarea', full: true },
+        { k: 'billFile', l: 'Bill / receipt photo (optional)', t: 'file', full: true },
       ],
       onChange(f, key) {
         const km = isKmType(f.get('expenseType'));
@@ -634,6 +637,7 @@
     return h;
   }
 
+  const billLink = (r) => (r && r.billFile ? ' <a href="#" class="bill-link" title="View bill" data-act="doc-view" data-id="' + esc(r.billFile) + '">📎</a>' : '');
   function rowActions(table, r) {
     return '<button class="btn ghost sm icon" title="Edit" data-act="edit" data-t="' + table + '" data-id="' + esc(r.id) + '">' + icon('edit') + '</button>' +
       '<button class="btn ghost sm icon danger" title="Delete" data-act="del" data-t="' + table + '" data-id="' + esc(r.id) + '">' + icon('trash') + '</button>';
@@ -746,6 +750,10 @@
       input = '<select class="input" id="' + id + '" name="' + fd.k + '"' + (addNew ? ' data-list="' + fd.list + '" data-label="' + esc(fd.l) + '"' : '') + '><option value="">' + (fd.req ? 'Select…' : '—') + '</option>' +
         opts.map((o) => '<option value="' + esc(o[0]) + '"' + (o[0] === v ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') +
         (addNew ? '<option value="__new__">+ Add new…</option>' : '') + '</select>';
+    } else if (fd.t === 'file') {
+      // PDF or photo (phones offer the camera). Uploaded after the entry is saved.
+      input = '<input type="hidden" name="' + fd.k + '" value="' + esc(v) + '"><input class="input" id="' + id + '" name="' + fd.k + '__file" type="file" accept="image/*,application/pdf">' +
+        (v ? '<span class="field-hint">📎 <a href="#" data-act="doc-view" data-id="' + esc(v) + '">View the current bill</a> — choose a new file to replace it</span>' : '<span class="field-hint">PDF or photo, up to 10 MB</span>');
     } else if (fd.t === 'textarea') {
       input = '<textarea class="input" id="' + id + '" name="' + fd.k + '" rows="2">' + esc(v) + '</textarea>';
     } else {
@@ -799,8 +807,18 @@
           if ((fd.t === 'money' || fd.t === 'number') && out[fd.k] !== '' && !isFinite(out[fd.k])) throw new Error(fd.l + ' must be a number');
         });
         if ('amount' in out && out.amount !== '' && out.amount <= 0) throw new Error('Amount must be more than 0');
+        const billField = def.fields.find((fd) => fd.t === 'file');
+        const billInput = billField && form.elements[billField.k + '__file'];
+        const billFileObj = billInput && billInput.files && billInput.files[0];
+        if (billFileObj && billFileObj.size > 10 * 1024 * 1024) throw new Error('The bill file is larger than 10 MB');
         if (def.beforeSave) def.beforeSave(out);
         const saved = await saveRecord(table, out);
+        if (billFileObj) {
+          try {
+            const up = await api('docUpload', { recordTable: table, recordId: saved.id, kind: 'Bill / Invoice', name: billFileObj.name, mime: billFileObj.type || 'application/octet-stream', data: await readAsBase64(billFileObj) });
+            saved.billFile = up.doc.id;
+          } catch (e) { toast('Saved, but the bill could not be uploaded: ' + e.message, true); }
+        }
         toast(def.title + (isNew ? ' added' : ' updated'));
         if (after) after(saved);
         renderPage();
@@ -963,7 +981,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-25.3';
+  const NEEDED_API = '2026-11-25.4';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -1253,7 +1271,7 @@
         selectFilter('client', 'workType', 'All work types', list('workTypes')) + csvBtn('client-work') + '</div>';
       h += '<div class="card">' + dataTable('client-work', [
         { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },
-        { k: 'description', l: 'Description', primary: true, f: (r) => esc(r.description || r.workType || r.costType) + '<div class="cell-sub">' + esc([r.workType, r.vendor, r.billNo && 'Bill ' + r.billNo].filter(Boolean).join(' · ')) + '</div>' },
+        { k: 'description', l: 'Description', primary: true, f: (r) => esc(r.description || r.workType || r.costType) + billLink(r) + '<div class="cell-sub">' + esc([r.workType, r.vendor, r.billNo && 'Bill ' + r.billNo].filter(Boolean).join(' · ')) + '</div>' },
         { k: 'costType', l: 'Type', f: (r) => '<span class="badge">' + esc(r.costType) + '</span>' },
         { k: 'qty', l: 'Qty × Rate', r: true, f: (r) => r.qty ? esc(r.qty + ' ' + (r.unit || '')) + ' × ' + inr(r.rate) : '' },
         { k: 'vendorPaid', l: 'Vendor', f: (r) => statusBadge(r.vendorPaid) },
@@ -1325,7 +1343,7 @@
       Object.keys(byCat).sort((a, b) => byCat[b] - byCat[a]).map((k) => '<div class="chip"><span class="k">' + esc(k) + '</span><span class="v num">' + inr(byCat[k]) + '</span></div>').join('') + '</div>';
     h += '<div class="card">' + dataTable('office', [
       { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },
-      { k: 'category', l: 'Category', primary: true, f: (r) => '<b>' + esc(r.category) + '</b>' + (r.description ? '<div class="cell-sub">' + esc(r.description) + '</div>' : '') },
+      { k: 'category', l: 'Category', primary: true, f: (r) => '<b>' + esc(r.category) + '</b>' + billLink(r._emp ? byId('EmployeeExpenses', r.id) : r) + (r.description ? '<div class="cell-sub">' + esc(r.description) + '</div>' : '') },
       { k: 'paidTo', l: 'Paid to', f: (r) => (r._emp ? '<span class="badge">' + esc(r.paidTo) + '</span>' : esc(r.paidTo)) + (r.billNo ? '<div class="cell-sub">Bill ' + esc(r.billNo) + '</div>' : '') },
       { k: 'mode', l: 'Mode', f: (r) => esc(r.mode) },
       { k: 'createdBy', l: 'Added by', f: (r) => esc(userName(r.createdBy)) },
@@ -1422,7 +1440,7 @@
       h += '<div class="card">' + dataTable('sal-exp', [
         { k: 'date', l: 'Date', f: (r) => esc(fmtDate(r.date)), csv: (r) => r.date },
         { k: 'employee', l: 'Employee', primary: true, v: (r) => empName(r.employeeId), f: (r) => '<b>' + esc(empName(r.employeeId)) + '</b><div class="cell-sub">' + esc(r.expenseType) + '</div>' },
-        { k: 'details', l: 'Particulars', v: (r) => r.fromTo, f: (r) => esc([r.fromTo, r.clientId && 'Site: ' + clientName(r.clientId)].filter(Boolean).join(' · ')) + (r.officeCategory ? ' <span class="badge">Office · ' + esc(r.officeCategory) + '</span>' : '') },
+        { k: 'details', l: 'Particulars', v: (r) => r.fromTo, f: (r) => esc([r.fromTo, r.clientId && 'Site: ' + clientName(r.clientId)].filter(Boolean).join(' · ')) + (r.officeCategory ? ' <span class="badge">Office · ' + esc(r.officeCategory) + '</span>' : '') + billLink(r) },
         { k: 'km', l: 'KM × rate', r: true, v: (r) => num(r.km), f: (r) => r.km ? esc(r.km) + ' × ' + inr(r.rate) : '' },
         { k: 'amount', l: 'Amount', r: true, total: true, v: (r) => num(r.amount), f: (r) => inr(r.amount) },
       ], list_, { actions: (r) => rowActions('EmployeeExpenses', r), name: 'Employee expenses ' + st.month, sort: { k: 'date', dir: 'desc' }, empty: 'No expenses for this month' }) + '</div>';

@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-25.3';
+const API_VERSION = '2026-11-25.4';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -45,7 +45,7 @@ const SCHEMA = {
   },
   ClientWork: {
     editable: true, prefix: 'CW',
-    fields: 'id date:date clientId workType costType description vendor qty:number unit rate:number amount:number billNo vendorPaid notes ' + META_FIELDS,
+    fields: 'id date:date clientId workType costType description vendor qty:number unit rate:number amount:number billNo vendorPaid notes billFile ' + META_FIELDS,
     required: ['date', 'clientId', 'costType', 'amount'],
     refs: { clientId: 'Clients' },
   },
@@ -57,7 +57,7 @@ const SCHEMA = {
   },
   OfficeExpenses: {
     editable: true, prefix: 'OE',
-    fields: 'id date:date category description amount:number mode paidTo billNo notes ' + META_FIELDS,
+    fields: 'id date:date category description amount:number mode paidTo billNo notes billFile ' + META_FIELDS,
     required: ['date', 'category', 'amount'],
   },
   Employees: {
@@ -67,7 +67,7 @@ const SCHEMA = {
   },
   EmployeeExpenses: {
     editable: true, prefix: 'EX',
-    fields: 'id date:date employeeId expenseType clientId fromTo km:number rate:number amount:number salaryMonth:month officeCategory notes ' + META_FIELDS,
+    fields: 'id date:date employeeId expenseType clientId fromTo km:number rate:number amount:number salaryMonth:month officeCategory notes billFile ' + META_FIELDS,
     required: ['date', 'employeeId', 'expenseType', 'amount', 'salaryMonth'],
     refs: { employeeId: 'Employees', clientId: 'Clients' },
   },
@@ -91,7 +91,7 @@ const SCHEMA = {
     fields: 'id date:date email name checkIn checkOut ip method status notes ' + META_FIELDS,
   },
   Documents: {
-    fields: 'id clientId estimateNo kind name mime size:number fileId notes ' + META_FIELDS,
+    fields: 'id clientId estimateNo recordTable recordId kind name mime size:number fileId notes ' + META_FIELDS,
   },
   Guides: { fields: 'id sort:number category title data ' + META_FIELDS },
   LeaveRequests: {
@@ -1285,10 +1285,17 @@ function docsFolder_() {
   return it.hasNext() ? it.next() : DriveApp.createFolder(DOCS_FOLDER);
 }
 
+const BILL_TABLES = ['OfficeExpenses', 'ClientWork', 'EmployeeExpenses'];
+
 function docUpload_(user, req) {
   const clientId = String(req.clientId || '');
   const estimateNo = String(req.estimateNo || '');
-  if (clientId) {
+  const recordTable = BILL_TABLES.indexOf(req.recordTable) >= 0 ? req.recordTable : '';
+  const recordId = recordTable ? String(req.recordId || '') : '';
+  if (recordTable) {
+    needRole_(user, WRITE_ROLES);
+    if (!readTable_(recordTable).some(function (r) { return r.id === recordId; })) throw err_('Save the entry first, then add its bill');
+  } else if (clientId) {
     needRole_(user, WRITE_ROLES);
     if (!readTable_('Clients').some(function (c) { return c.id === clientId; })) throw err_('Client not found');
   } else if (estimateNo) {
@@ -1303,19 +1310,24 @@ function docUpload_(user, req) {
   const file = docsFolder_().createFile(Utilities.newBlob(bytes, mime, name));
   const now = new Date().toISOString();
   const o = {
-    id: newId_('DC'), clientId: clientId, estimateNo: estimateNo, kind: String(req.kind || 'Other').slice(0, 40), name: name, mime: mime,
+    id: newId_('DC'), clientId: clientId, estimateNo: estimateNo, recordTable: recordTable, recordId: recordId, kind: String(req.kind || 'Other').slice(0, 40), name: name, mime: mime,
     size: bytes.length, fileId: file.getId(), notes: String(req.notes || '').slice(0, 300),
     createdBy: user.email, createdAt: now, updatedBy: user.email, updatedAt: now,
   };
   appendObj_('Documents', o);
-  audit_(user, 'upload', 'Documents', o.id, o.kind + ': ' + name + (clientId ? ' (client)' : ' (estimate ' + estimateNo + ')'));
+  if (recordTable) patchRow_(recordTable, recordId, { billFile: o.id, updatedBy: user.email, updatedAt: now });
+  audit_(user, 'upload', 'Documents', o.id, o.kind + ': ' + name + (recordTable ? ' (' + recordTable + ' ' + recordId + ')' : clientId ? ' (client)' : ' (estimate ' + estimateNo + ')'));
   return { doc: o };
 }
 
 function docFind_(user, id) {
   const d = readTable_('Documents').filter(function (x) { return x.id === id; })[0];
   if (!d) throw err_('Document not found');
-  const ok = ACCOUNTS_ROLES.indexOf(user.role) >= 0 || (d.estimateNo && canSeeEstimateNo_(user, d.estimateNo)) || String(d.createdBy).toLowerCase() === String(user.email).toLowerCase();
+  let ok = ACCOUNTS_ROLES.indexOf(user.role) >= 0 || (d.estimateNo && canSeeEstimateNo_(user, d.estimateNo)) || String(d.createdBy).toLowerCase() === String(user.email).toLowerCase();
+  if (!ok && d.recordTable === 'EmployeeExpenses') {
+    const me = linkedEmployee_(user);
+    ok = !!me && readTable_('EmployeeExpenses').some(function (x) { return x.id === d.recordId && x.employeeId === me.id; });
+  }
   if (!ok) throw err_('You cannot open this document', 'FORBIDDEN');
   return d;
 }
