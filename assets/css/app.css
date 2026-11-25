@@ -511,3 +511,8 @@ textarea.ainput { resize: vertical; display: block; }
 /* Table pages (20 rows each) */
 .pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--border); }
 .pager .sp { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* Attendance: where are you working from */
+.place-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.place-opt { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 12px; cursor: pointer; font-weight: 600; }
+.place-opt:has(input:checked) { border-color: var(--brand, #c00000); background: rgba(192, 0, 0, .06); }

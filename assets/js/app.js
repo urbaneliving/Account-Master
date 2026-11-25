@@ -963,7 +963,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-25.2';
+  const NEEDED_API = '2026-11-25.3';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -2243,17 +2243,39 @@
     });
   }
 
-  async function markAttendance(kind, useGeo) {
+  async function markAttendance(kind, useGeo, place, note) {
     const ips = await publicIps(true);
     const ip = ips.list.find(ipAllowed) || ips.list[0] || '';
     let lat = '';
     let lng = '';
-    if (!ipAllowed(ip) && useGeo) { const g = await getGeo(); lat = g.latitude; lng = g.longitude; }
-    const r = await api('attendanceMark', { kind: kind, ip: ip, lat: lat, lng: lng });
+    if (!ipAllowed(ip) && useGeo) { try { const g = await getGeo(); lat = g.latitude; lng = g.longitude; } catch (e) { if (!place) throw e; } }
+    const r = await api('attendanceMark', { kind: kind, ip: ip, lat: lat, lng: lng, place: place || '', note: note || '' });
     S.attendanceToday = r.record;
     S.attRows = {};
     S.todayFetched = null;
     return r;
+  }
+
+  const PLACES = [['Office', '🏢 Office'], ['Site visit', '🏗️ Site visit'], ['Client meeting', '🤝 Client meeting'], ['Work from home', '🏠 Work from home'], ['Other', '📍 Other']];
+  // Opened outside the office network: ask where the person is working from.
+  function askPlace(kind) {
+    const geoOn = !!((S.settings.attendance || {}).geo || {}).enabled;
+    openModal('Where are you working from today?', '<p class="small muted" style="margin-top:0">You are not on the office network right now. Choose one to mark your attendance' + (kind === 'out' ? ' (check-out)' : '') + '.</p>' +
+      '<div class="place-grid">' + PLACES.map((p, i) => '<label class="place-opt"><input type="radio" name="place" value="' + p[0] + '"' + (i === 0 ? '' : '') + '><span>' + p[1] + '</span></label>').join('') + '</div>' +
+      '<label class="field" style="margin-top:12px">Note (optional)<input class="input" name="note" maxlength="200" placeholder="e.g. Mohit Ji site, Dwarka"></label>' +
+      (isAdmin() ? '<p class="small muted" style="margin-bottom:0">Admin: choosing Office also saves this internet connection as the office network.</p>' : ''), {
+      submit: 'Mark attendance',
+      onSubmit: async (form) => {
+        const place = (form.querySelector('input[name=place]:checked') || {}).value;
+        if (!place) throw new Error('Choose where you are working from');
+        if (place === 'Office' && isAdmin() && S.ips && S.ips.list.length) {
+          try { const n = await api('attendanceAddNetwork', { ips: S.ips.list }); S.settings.attendance = n.attendance; } catch (e) { /* still mark below */ }
+        }
+        const r = await markAttendance(kind || (S.attendanceToday ? 'out' : 'in'), geoOn, place, form.note.value);
+        toast(r.action === 'in' ? 'Attendance marked · ' + r.record.checkIn + ' · ' + place : r.action === 'out' ? 'Checked out · ' + r.record.checkOut : 'Already checked in');
+        renderPage();
+      },
+    });
   }
 
   async function autoAttendance() {
@@ -2261,7 +2283,14 @@
     if (!a || !a.autoMark || !S.user) return;
     try {
       const ips = await publicIps();
-      if (!ips.list.some(ipAllowed)) return;
+      if (!ips.list.some(ipAllowed)) {
+        // once a day: ask where they are working from
+        const k = 'ul-asked-' + S.user.email + '-' + today();
+        let asked = false;
+        try { asked = !!localStorage.getItem(k); localStorage.setItem(k, '1'); } catch (e) { /* ignore */ }
+        if (!S.attendanceToday && !asked && !$('#modal-root .modal')) askPlace('in');
+        return;
+      }
       const r = await markAttendance(S.attendanceToday ? 'out' : 'in');
       if (r.action === 'in') toast('Attendance marked · ' + r.record.checkIn + (r.record.status === 'Late' ? ' (late)' : ''));
       if (route().page === 'attendance') renderPage();
@@ -2288,10 +2317,10 @@
       '<div style="display:flex;gap:14px;align-items:center">' + avatar(S.user, 52) + '<div><div style="font-weight:700;font-size:16px">' + esc(S.user.name) + ' <span class="muted small" style="font-weight:400">' + esc(S.user.designation || '') + '</span></div>' +
       '<div class="small muted">Today · ' + esc(fmtDate(today())) + '</div><div style="font-size:20px;font-weight:700;margin:4px 0">' +
       (t ? statusBadge(t.status) + ' In ' + esc(t.checkIn) + (t.checkOut ? ' · Out / last seen ' + esc(t.checkOut) : '') : 'Not marked yet') + '</div>' +
-      '<div class="small ' + (ips ? (inOffice ? 'pos' : 'neg') : 'muted') + '">' + (ips ? (inOffice ? '✓ On office network' : '✗ Not on office network') + ' · IP ' + esc(ips.list.join(', ') || 'unknown') : 'Checking your network…') + '</div></div></div>' +
+      '<div class="small ' + (t || inOffice ? 'pos' : 'muted') + '">' + (t && t.method ? '📍 ' + esc(t.method) + (t.notes ? ' — ' + esc(t.notes) : '') : ips ? (inOffice ? '✓ On office network' : 'Outside the office network — press Check in and choose where you are working from') : 'Checking your network…') + '</div></div></div>' +
       '<div class="page-actions">' + (!t ? '<button class="btn primary" data-act="att-mark" data-kind="in">Check in</button>' : '<button class="btn" data-act="att-mark" data-kind="out">Check out</button>') +
       (geoOn && !inOffice ? '<button class="btn" data-act="att-mark" data-kind="' + (t ? 'out' : 'in') + '" data-geo="1">Use my location</button>' : '') +
-      (isAdmin() && ips && ips.list.length && !inOffice ? '<button class="btn" data-act="att-add-net" title="The office internet address changes from time to time">I am in the office — use this network</button>' : '') + '</div></div></div>';
+      '</div></div></div>';
     const pendingForMe = (S.leaves || []).filter((r) => r.canDecide).length;
     const leaveTab = ['leave', 'Leave', pendingForMe || undefined];
     if (team) h += tabs('attendance', [['me', 'My attendance'], leaveTab, ['today', 'Today'], ['team', 'Month']], 'me');
@@ -2315,7 +2344,7 @@
         { k: 'status', l: 'Status', v: (x) => (x.r ? x.r.status : 'Not marked'), f: (x) => (x.r ? statusBadge(x.r.status) : '<span class="badge bad">Not marked</span>') },
         { k: 'in', l: 'In', v: (x) => (x.r ? x.r.checkIn : ''), f: (x) => esc(x.r ? x.r.checkIn : '') },
         { k: 'out', l: 'Out / last seen', v: (x) => (x.r ? x.r.checkOut : ''), f: (x) => esc(x.r ? x.r.checkOut : '') },
-        { k: 'method', l: 'Marked by', v: (x) => (x.r ? x.r.method : ''), f: (x) => (x.r ? esc(x.r.method) + (x.r.ip ? '<div class="cell-sub">' + esc(x.r.ip) + '</div>' : '') : '') },
+        { k: 'method', l: 'Working from', v: (x) => (x.r ? x.r.method : ''), f: (x) => (x.r ? esc(x.r.method) + (x.r.notes ? '<div class="cell-sub">' + esc(x.r.notes) + '</div>' : '') : '') },
       ], list, {
         sort: { k: 'name', dir: 'asc' },
         actions: isAdmin() ? (x) => '<button class="btn sm" data-act="att-edit" data-email="' + esc(x.u.email) + '" data-date="' + td + '">' + icon('edit') + 'Edit</button>' : null,
@@ -2335,7 +2364,7 @@
         { k: 'checkIn', l: 'In', f: (r) => esc(r.checkIn) },
         { k: 'checkOut', l: 'Out / last seen', f: (r) => esc(r.checkOut) },
         { k: 'hours', l: 'Hours', r: true, v: attHours, f: (r) => fmtHours(attHours(r)) },
-        { k: 'method', l: 'Marked by', f: (r) => esc(r.method) + (r.notes ? '<div class="cell-sub">' + esc(r.notes) + '</div>' : '') },
+        { k: 'method', l: 'Working from', f: (r) => esc(r.method) + (r.notes ? '<div class="cell-sub">' + esc(r.notes) + '</div>' : '') },
       ], mine, { sort: { k: 'date', dir: 'desc' }, empty: 'No attendance this month' }) + '</div>';
       return h;
     }
@@ -3620,6 +3649,8 @@
       case 'att-mark':
         el.disabled = true;
         try {
+          const ipsNow = await publicIps();
+          if (!ipsNow.list.some(ipAllowed) && el.dataset.kind === 'in') { el.disabled = false; askPlace('in'); break; }
           const r = await markAttendance(el.dataset.kind, !!el.dataset.geo);
           toast(r.action === 'in' ? 'Checked in · ' + r.record.checkIn : r.action === 'out' ? 'Checked out · ' + r.record.checkOut : 'Already checked in');
         } catch (err) { toast(err.message, true); }

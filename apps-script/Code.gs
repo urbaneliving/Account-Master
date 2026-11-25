@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-25.2';
+const API_VERSION = '2026-11-25.3';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -2673,10 +2673,23 @@ function attendanceAddNetwork_(user, ips) {
   return { attendance: readSettings_().attendance };
 }
 
+// Where people work from when they are not on the office network.
+const WORK_PLACES = ['Office', 'Site visit', 'Client meeting', 'Work from home', 'Other'];
+
 function attendanceMark_(user, req) {
   const settings = readSettings_();
-  const method = officeCheck_(settings, req.ip, req.lat, req.lng);
-  if (!method) throw err_('Attendance can be marked only from the office network. Your IP: ' + (req.ip || 'unknown'), 'NOT_OFFICE');
+  // On the office network → "Office IP". Anywhere else the person says where
+  // they are working from; the IP address never blocks attendance.
+  let method = officeCheck_(settings, req.ip, req.lat, req.lng);
+  let note = '';
+  if (!method) {
+    const place = WORK_PLACES.indexOf(req.place) >= 0 ? req.place : '';
+    const already = readTable_('Attendance').some(function (r) { return r.date === Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd') && r.email.toLowerCase() === user.email.toLowerCase(); });
+    if (!place && !already) throw err_('Where are you working from today?', 'NEED_PLACE');
+    method = place === 'Office' ? 'Office (network not recognised)' : place || 'Outside office';
+    note = String(req.note || '').trim().slice(0, 200);
+    if (req.lat !== '' && req.lat !== undefined && req.lng !== '' && req.lng !== undefined) note = (note ? note + ' · ' : '') + 'Location ' + Number(req.lat).toFixed(5) + ',' + Number(req.lng).toFixed(5);
+  }
   const now = new Date();
   const date = Utilities.formatDate(now, TZ, 'yyyy-MM-dd');
   const time = Utilities.formatDate(now, TZ, 'HH:mm');
@@ -2687,7 +2700,7 @@ function attendanceMark_(user, req) {
     if (!row) {
       const o = {
         id: newId_('AT'), date: date, email: user.email, name: user.name, checkIn: time, checkOut: '', ip: String(req.ip || '').slice(0, 60), method: method,
-        status: time > settings.attendance.startTime ? 'Late' : 'Present', notes: '',
+        status: time > settings.attendance.startTime ? 'Late' : 'Present', notes: note,
         createdBy: user.email, createdAt: now.toISOString(), updatedBy: user.email, updatedAt: now.toISOString(),
       };
       appendObj_('Attendance', o);
