@@ -543,6 +543,7 @@
     S.apiVersion = r.apiVersion || '';
     S.salarySheet = r.salarySheet || {};
     S.tabAdvances = r.tabAdvances || {};
+    S.autoSync = !!r.autoSync;
     S.leaveDays = r.leaveDays || [];
   }
 
@@ -962,7 +963,7 @@
   }
 
   // The dashboard needs the Apps Script code from this same release.
-  const NEEDED_API = '2026-11-24.15';
+  const NEEDED_API = '2026-11-25.2';
   function backendNotice() {
     if (DEMO || !S.user || !canWrite()) return '';
     const v = S.apiVersion || 'old';
@@ -2289,7 +2290,8 @@
       (t ? statusBadge(t.status) + ' In ' + esc(t.checkIn) + (t.checkOut ? ' · Out / last seen ' + esc(t.checkOut) : '') : 'Not marked yet') + '</div>' +
       '<div class="small ' + (ips ? (inOffice ? 'pos' : 'neg') : 'muted') + '">' + (ips ? (inOffice ? '✓ On office network' : '✗ Not on office network') + ' · IP ' + esc(ips.list.join(', ') || 'unknown') : 'Checking your network…') + '</div></div></div>' +
       '<div class="page-actions">' + (!t ? '<button class="btn primary" data-act="att-mark" data-kind="in">Check in</button>' : '<button class="btn" data-act="att-mark" data-kind="out">Check out</button>') +
-      (geoOn && !inOffice ? '<button class="btn" data-act="att-mark" data-kind="' + (t ? 'out' : 'in') + '" data-geo="1">Use my location</button>' : '') + '</div></div></div>';
+      (geoOn && !inOffice ? '<button class="btn" data-act="att-mark" data-kind="' + (t ? 'out' : 'in') + '" data-geo="1">Use my location</button>' : '') +
+      (isAdmin() && ips && ips.list.length && !inOffice ? '<button class="btn" data-act="att-add-net" title="The office internet address changes from time to time">I am in the office — use this network</button>' : '') + '</div></div></div>';
     const pendingForMe = (S.leaves || []).filter((r) => r.canDecide).length;
     const leaveTab = ['leave', 'Leave', pendingForMe || undefined];
     if (team) h += tabs('attendance', [['me', 'My attendance'], leaveTab, ['today', 'Today'], ['team', 'Month']], 'me');
@@ -3043,7 +3045,7 @@
       return { match: v('match'), field: v('field'), dir: v('dir'), action: v('action'), target: v('target'), unless: v('unless'), note: v('note'), fallback: v('fallback'), costType: v('costType') };
     }).filter((r) => r.match);
   }
-  async function runDayBookSync(loud) {
+  async function runDayBookSync(loud, quiet) {
     try {
       let r = await api('dayBookSync');
       if (r.result.busy) { if (loud) toast(r.result.summary); return r.result; }
@@ -3058,6 +3060,7 @@
       if (loud) toast('Day Book synced: ' + r.result.summary);
       return r.result;
     } catch (e) {
+      if (quiet) return null; // background try: Google's timer will read it anyway
       S.settings.mirror.lastError = e.message;
       toast((loud ? '' : 'Day Book sync failed: ') + e.message + (loud ? '' : ' — see Settings → Accountant sheet & sync'), true);
       return null;
@@ -3067,8 +3070,10 @@
   async function autoDayBookSync() {
     const m = S.settings && S.settings.mirror;
     if (!canWrite() || !m || !m.readEnabled) return;
-    if (m.lastSync && Date.now() - new Date(m.lastSync).getTime() < 10 * 60000) return;
-    const r = await runDayBookSync(false);
+    // Google's timer reads the Day Book every 15 minutes; the browser only steps in when it hasn't for a while.
+    const age = m.lastSync ? Date.now() - new Date(m.lastSync).getTime() : Infinity;
+    if (age < (S.autoSync ? 40 : 10) * 60000) return;
+    const r = await runDayBookSync(false, true);
     if (r && (r.added || r.changed || r.removed)) { toast('Day Book: ' + r.summary); renderShell(); renderPage(); }
   }
 
@@ -3599,6 +3604,19 @@
         if (!confirm('Go back to the built-in estimate template?')) break;
         try { const r = await api('saveSettings', { settings: { estimateTemplate: null } }); S.settings = r.settings; toast('Template reset'); renderPage(); } catch (err) { toast(err.message, true); }
         break;
+      case 'att-add-net': {
+        const ips = S.ips && S.ips.list;
+        if (!ips || !ips.length || !confirm('Save this internet connection (' + ips.join(', ') + ') as the office network?\n\nDo this only while you are in the office.')) break;
+        el.disabled = true;
+        try {
+          const r = await api('attendanceAddNetwork', { ips: ips });
+          S.settings.attendance = r.attendance;
+          toast('Office network saved — attendance works on it now');
+          if (!S.attendanceToday) { const m = await markAttendance('in'); if (m.action === 'in') toast('Attendance marked · ' + m.record.checkIn); }
+          renderPage();
+        } catch (err) { toast(err.message, true); el.disabled = false; }
+        break;
+      }
       case 'att-mark':
         el.disabled = true;
         try {

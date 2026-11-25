@@ -7,7 +7,7 @@
  * the Web App URL in assets/js/config.js.
  */
 
-const API_VERSION = '2026-11-24.15';
+const API_VERSION = '2026-11-25.2';
 const DOCS_FOLDER = 'Urbane Living - Client Documents';
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_ID = '1MAtOq_XKFCRWr7cMFMWYiEVXl71C9tokYj2NCeA2pkQ';
@@ -224,6 +224,7 @@ function route_(req) {
     case 'estimateToClient': return estimateToClient_(user, req.estimateNo);
     case 'estimateImport': return estimateImport_(user, req.records);
     case 'attendanceMark': return attendanceMark_(user, req);
+    case 'attendanceAddNetwork': return attendanceAddNetwork_(user, req.ips);
     case 'attendanceList': return { rows: attendanceList_(user, req.from, req.to) };
     case 'attendanceSave': return attendanceSave_(user, req.record);
     default: throw err_('Unknown action: ' + req.action);
@@ -366,6 +367,7 @@ function bootstrapRun_(user) {
     guides: guidesList_(),
     defaultRules: WRITE_ROLES.indexOf(user.role) >= 0 ? defaultDayBookRules_() : [],
     leaves: leaveList_(user),
+    autoSync: WRITE_ROLES.indexOf(user.role) >= 0 ? ensureAutoSync_() : false,
     salarySheet: accounts ? salarySheetMonths_() : {},
     tabAdvances: accounts ? settingJson_('tabAdvances', {}) : {},
     leaveDays: accounts ? approvedLeaves_() : [],
@@ -1474,7 +1476,8 @@ function mirrorSyncAll_(user) {
 const DAYBOOK_TAG = '[daybook]';
 let SALARY_INFO_ = {};
 let SALARY_MONTHS_ = {};
-let TAB_ADVANCES_ = {}; // advances written in each employee's own tab: { 'yyyy-MM': { employeeId: amount } }
+let TAB_ADVANCES_ = {};
+let DAYBOOK_LINES_ = []; // advances written in each employee's own tab: { 'yyyy-MM': { employeeId: amount } }
 let SYNC_BUDGET_MS_ = 240000; // ~4 of the 6 minutes Google allows per run
 
 function cleanRule_(r) {
@@ -2071,6 +2074,7 @@ function parseExpenseTab_(tab, defaultRate) {
       if (seenAt[dupKey] !== undefined && seenAt[dupKey] !== table) continue;
       seenAt[dupKey] = table;
       line.date = date;
+      line.table = table;
       line.salaryMonth = cycleOf_(date); // 11th–10th salary month
       lines.push(line);
     }
@@ -2091,6 +2095,48 @@ function officeCategoryOf_(desc, cats) {
     (/for (the )?office|office use|office exp|office purchase/.test(t) ? 'Other' : '');
 }
 
+// A line in an employee's tab with the wrong month (e.g. "05-10-2026" written for
+// 5 Nov): if the Day Book has the same amount for that employee on the same day
+// of a month next to it, the Day Book date is right. The other lines of that
+// table written in the same wrong month are moved by the same number of months.
+const STOP_WORDS_ = ['being', 'payment', 'paid', 'upi', 'neft', 'imps', 'rtgs', 'cash', 'bank', 'the', 'and', 'for', 'from', 'with', 'advance', 'adv', 'salary', 'amount', 'site', 'sir', 'company'];
+function fixTabDatesFromDayBook_(lines, empName) {
+  if (!DAYBOOK_LINES_.length) return;
+  const first = firstName_(empName);
+  const day = 86400000;
+  const t = function (x) { return new Date(x + 'T00:00:00').getTime(); };
+  const shift = {}; // table|yyyy-MM → months to add
+  lines.forEach(function (l) {
+    if (l.km) return;
+    const hit = DAYBOOK_LINES_.filter(function (d) {
+      if (Math.abs(d.dr - l.amount) > 0.5 || d.date === l.date || d.date.slice(8) !== l.date.slice(8)) return false;
+      const gap = Math.abs(t(d.date) - t(l.date));
+      const text = (d.narration + ' ' + d.remarks).toLowerCase();
+      if (!(gap > 20 * day && gap < 70 * day && text.indexOf(first) >= 0)) return false;
+      // and they talk about the same thing: at least 2 words in common (names, amounts, items)
+      const words = function (x) { return String(x).toLowerCase().split(/[^a-z0-9]+/).filter(function (w) { return w.length >= 3 && STOP_WORDS_.indexOf(w) < 0 && w !== first; }); };
+      const tw = words(text);
+      return words(l.desc).filter(function (w, i, arr) { return arr.indexOf(w) === i && tw.indexOf(w) >= 0; }).length >= 2;
+    })[0];
+    if (!hit) return;
+    const months = (Number(hit.date.slice(0, 4)) - Number(l.date.slice(0, 4))) * 12 + Number(hit.date.slice(5, 7)) - Number(l.date.slice(5, 7));
+    shift[l.table + '|' + l.date.slice(0, 7)] = months;
+    l.fixedFrom = l.date;
+    l.date = hit.date;
+  });
+  if (!Object.keys(shift).length) return;
+  const today = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
+  lines.forEach(function (l) {
+    const months = shift[l.table + '|' + l.date.slice(0, 7)];
+    if (l.fixedFrom || !months) return;
+    const d = new Date(l.date + 'T00:00:00');
+    d.setMonth(d.getMonth() + months);
+    const nd = Utilities.formatDate(d, TZ, 'yyyy-MM-dd');
+    if (nd <= today) { l.fixedFrom = l.date; l.date = nd; }
+  });
+  lines.forEach(function (l) { if (l.fixedFrom) { l.salaryMonth = cycleOf_(l.date); l.desc = l.desc + ' (date in sheet ' + l.fixedFrom + ')'; } });
+}
+
 function expenseLines_(ss, dayBookTab) {
   const cats = readSettings_().lists.officeCategories || [];
   const rate = Number(readSettings_().company.perKmRate) || 3;
@@ -2098,6 +2144,7 @@ function expenseLines_(ss, dayBookTab) {
   expenseTabs_(ss, dayBookTab).forEach(function (t) {
     const seen = {};
     const parsed = parseExpenseTab_(t, rate);
+    fixTabDatesFromDayBook_(parsed, t.emp.name);
     (parsed.advances || []).forEach(function (a) {
       const m = cycleOf_(a.date);
       const o = TAB_ADVANCES_[m] = TAB_ADVANCES_[m] || {};
@@ -2171,6 +2218,7 @@ function syncDayBookRun_(user) {
     });
     SALARY_MONTHS_ = {};
     TAB_ADVANCES_ = {};
+    DAYBOOK_LINES_ = [];
     const rules = dayBookRules_();
     SALARY_INFO_ = readSalarySheet_(m.ss);
     const links = {};
@@ -2189,7 +2237,8 @@ function syncDayBookRun_(user) {
       const last = m.sh.getLastRow();
       const refVals = last > 1 ? m.sh.getRange(2, m.refCol, last - 1, 2).getValues() : [];
       let refsChanged = false;
-      readDayBookLines_(m).forEach(function (l) {
+      DAYBOOK_LINES_ = readDayBookLines_(m);
+      DAYBOOK_LINES_.forEach(function (l) {
         if (res.more) return;
         if (l.ref && !/^DB-/.test(l.ref)) return; // written by the dashboard itself
         if (!(l.ref && links[l.ref]) && overBudget()) { res.more = true; return; }
@@ -2320,6 +2369,21 @@ function runSyncNow() {
 }
 
 /** Run once from the editor to read the Day Book automatically every 15 minutes. */
+// Called on load by Admin/Accountant: the Day Book is then read by Google's own
+// timer every 15 minutes, not by the browser. Checked at most every 6 hours.
+function ensureAutoSync_() {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('AUTO_SYNC_OK')) return true;
+  try {
+    const has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'autoSyncDayBook'; });
+    if (!has) ScriptApp.newTrigger('autoSyncDayBook').timeBased().everyMinutes(15).create();
+    cache.put('AUTO_SYNC_OK', '1', 21600);
+    return true;
+  } catch (e) {
+    return false; // timer permission not given yet: the browser keeps syncing
+  }
+}
+
 function enableAutoSync() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'autoSyncDayBook') ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('autoSyncDayBook').timeBased().everyMinutes(15).create();
@@ -2587,6 +2651,26 @@ function officeCheck_(settings, ip, lat, lng) {
 function attendanceToday_(user) {
   const today = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
   return readTable_('Attendance').filter(function (r) { return r.date === today && r.email.toLowerCase() === user.email.toLowerCase(); })[0] || null;
+}
+
+// The office internet's IPv6 address changes from time to time. An Admin in the
+// office adds the current one with one click (IPv6 by its first 4 groups, IPv4 exact).
+function attendanceAddNetwork_(user, ips) {
+  needRole_(user, ['Admin']);
+  const add = (ips || []).map(function (ip) {
+    ip = String(ip || '').trim().toLowerCase();
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return ip;
+    const g = v6Groups_(ip);
+    return g ? g.slice(0, 4).join(':') : '';
+  }).filter(String);
+  if (!add.length) throw err_('Could not read your network address');
+  const a = readSettings_().attendance;
+  const list = a.ipPrefixes.slice();
+  add.forEach(function (x) { if (list.indexOf(x) < 0) list.push(x); });
+  const cfg = Object.assign({}, a, { ipPrefixes: list.slice(-30) });
+  writeSettings_(user, [['attendance', cfg]]);
+  audit_(user, 'update', 'Settings', 'attendance', 'Office network added: ' + add.join(', '));
+  return { attendance: readSettings_().attendance };
 }
 
 function attendanceMark_(user, req) {
